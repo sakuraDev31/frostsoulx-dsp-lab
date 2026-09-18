@@ -2,20 +2,18 @@ name: Build FrostSoulX DSP Lab
 
 on:
   push:
-    branches:
-      - main
+    branches: [main , genspark ai developer]
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  JAVA_VERSION: "17"
-  ANDROID_NDK_VERSION: "28.2.13676358"
-  ANDROID_CMAKE_VERSION: "3.22.1"
+  JAVA_VERSION: '17'
+  ANDROID_NDK_VERSION: '28.2.13676358'
+  ANDROID_CMAKE_VERSION: '3.22.1'
 
 jobs:
   build-debug-apk:
@@ -23,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -35,31 +33,28 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses >/dev/null || true
-
-      - name: Install Android SDK, NDK, and CMake
-        run: |
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-37" \
-            "build-tools;36.0.0" \
-            "ndk;${ANDROID_NDK_VERSION}" \
-            "cmake;${ANDROID_CMAKE_VERSION}"
+        with:
+          packages: |
+            platform-tools
+            platforms;android-37
+            build-tools;36.0.0
+            ndk;${{ env.ANDROID_NDK_VERSION }}
+            cmake;${{ env.ANDROID_CMAKE_VERSION }}
+          accept-android-sdk-license: true
+          log-accepted-android-sdk-licenses: false
 
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
-      - name: Check Gradle
+      - name: Validate Gradle wrapper
         run: ./gradlew --version
 
-      - name: Build debug APK
+      - name: Build universal debug APK
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
         env:
-          GRADLE_OPTS: "-Xmx4g -Dfile.encoding=UTF-8"
+          GRADLE_OPTS: -Xmx4g -Dfile.encoding=UTF-8
 
-      - name: Verify APK
+      - name: Verify APK output
         run: |
           test -s app/build/outputs/apk/debug/app-debug.apk
           sha256sum app/build/outputs/apk/debug/app-debug.apk
@@ -72,4 +67,3 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
-          
