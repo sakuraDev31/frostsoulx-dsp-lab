@@ -14,7 +14,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
-/** I/O only. Staged ZIPs are never dlopen'ed or extracted into executable app storage. */
+/** Bounded ZIP I/O. Only explicitly trusted, ABI-validated compiled bundles can execute. */
 object EngineBundles {
     private const val ZIP_LIMIT = 128L * 1024 * 1024
     private const val EXPANDED_LIMIT = 256L * 1024 * 1024
@@ -42,7 +42,7 @@ object EngineBundles {
             } ?: error("Cannot read the selected document")
             val kind = validate(temp)
             Files.move(temp.toPath(), staged(context).toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
-            return "$kind ZIP staged · rebuild required to activate"
+            return kind
         } finally { temp.delete() }
     }
 
@@ -85,13 +85,20 @@ object EngineBundles {
             require(manifest.optInt("format") == 1) { "Unsupported engine manifest" }
             val checksums = manifest.optJSONObject("sha256") ?: error("Missing bundle checksums")
             val prefix = entry.name.substringBeforeLast('/', "").let { if (it.isEmpty()) it else "$it/" }
+            if (sources == 0) {
+                require(manifest.optInt("engine_api") == 1) { "Requires C plugin ABI v1; rebuild only the engine with build-engine-bundle.sh" }
+                require(files.filter { it != entry }.all { checksums.has(it.name.removePrefix(prefix)) }) { "Every compiled bundle file must have a checksum" }
+                require(manifest.optString("kind") == "compiled") { "Invalid compiled manifest" }
+            }
             checksums.keys().forEach { path ->
                 require(safePath(path) && hashes[prefix + path] == checksums.getString(path)) { "Checksum mismatch: $path" }
             }
         }
         if (sources == 1) "Source" else {
             require(manifests.isNotEmpty()) { "Compiled ZIP requires a versioned manifest" }
-            abis.forEach { abi ->
+            val available = abis.filter { abi -> files.any { it.name.endsWith("lib/$abi/libfrostsoulx_engine.so") } }
+            require(available.isNotEmpty()) { "ZIP has no supported native ABI" }
+            available.forEach { abi ->
                 listOf("libfrostsoulx_engine.so", "libphonon.so").forEach { name ->
                     val matches = files.filter { it.name.endsWith("lib/$abi/$name") }
                     require(matches.size == 1) { "Missing or ambiguous $abi/$name" }
@@ -111,8 +118,12 @@ object EngineBundles {
         writeDocument(context, uri) { output -> staged(context).inputStream().use { copyBounded(it, output, ZIP_LIMIT) } }
     }
 
-    /** Export the actual APK's engine, not the staged replacement or the JNI/player library. */
+    /** Export exactly the loaded generation, or the built-in APK engine. */
     fun exportActive(context: Context, uri: Uri) {
+        activeDirectory(context)?.let { active ->
+            writeDocument(context, uri) { out -> File(active, "bundle.zip").inputStream().use { copyBounded(it, out, ZIP_LIMIT) } }
+            return
+        }
         val temp = File.createTempFile("engine-sdk-", ".zip", context.cacheDir)
         try {
             val hashes = JSONObject()
@@ -136,7 +147,7 @@ object EngineBundles {
                     out.closeEntry()
                     hashes.put(name, hash.digest().joinToString("") { "%02x".format(it.toInt() and 255) })
                 }
-                for (name in listOf("include/frostsoulx/immersive_audio_engine.h", "CMakeLists.txt", "LICENSE.md")) {
+                for (name in listOf("include/frostsoulx/immersive_audio_engine.h", "include/engine_api.h", "CMakeLists.txt", "LICENSE.md")) {
                     entry(name, context.assets.open("engine-sdk/$name"))
                 }
                 val apks = listOf(context.applicationInfo.sourceDir) + (context.applicationInfo.splitSourceDirs?.toList() ?: emptyList())
@@ -148,11 +159,10 @@ object EngineBundles {
                         }
                     }
                 } }
-                require(abis.all { "lib/$it/libfrostsoulx_engine.so" in found && "lib/$it/libphonon.so" in found }) {
-                    "This APK lacks both engine ABIs; use a universal APK or the desktop SDK exporter"
-                }
-                val manifest = JSONObject().put("format", 1).put("kind", "compiled").put("abis", JSONArray(abis))
-                    .put("activation", "rebuild-required").put("sha256", hashes)
+                val included = abis.filter { "lib/$it/libfrostsoulx_engine.so" in found && "lib/$it/libphonon.so" in found }
+                require(included.isNotEmpty()) { "APK has no exportable native engine" }
+                val manifest = JSONObject().put("format", 1).put("kind", "compiled").put("abis", JSONArray(included))
+                    .put("engine_api", 1).put("activation", "runtime-plugin").put("sha256", hashes)
                 out.putNextEntry(ZipEntry("engine-manifest.json"))
                 out.write(manifest.toString(2).toByteArray())
                 out.closeEntry()
@@ -160,6 +170,97 @@ object EngineBundles {
             require(temp.length() <= ZIP_LIMIT) { "Export exceeds 128 MiB" }
             writeDocument(context, uri) { output -> temp.inputStream().use { copyBounded(it, output, ZIP_LIMIT) } }
         } finally { temp.delete() }
+    }
+
+    private fun preferences(context: Context) = context.getSharedPreferences("engine_loader", Context.MODE_PRIVATE)
+    private fun root(context: Context) = File(context.noBackupFilesDir, "engines").also { it.mkdirs() }
+    private fun activeDirectory(context: Context): File? {
+        val name = preferences(context).getString("active", null) ?: return null
+        require(name.matches(Regex("engine-[a-zA-Z0-9-]+"))) { "Invalid active generation" }
+        return File(root(context), name).takeIf { it.isDirectory }
+    }
+    fun activeLabel(context: Context) = activeDirectory(context)?.name ?: "Built-in engine"
+
+    // Compare dependency content, not filenames. Android reuses already-loaded SONAMEs;
+    // silently accepting a different Steam Audio or C++ runtime would test the wrong code.
+    private fun installedDigest(context: Context, name: String): String? {
+        val apks = listOf(context.applicationInfo.sourceDir) + (context.applicationInfo.splitSourceDirs?.toList() ?: emptyList())
+        for (apk in apks) ZipFile(apk).use { zip ->
+            zip.getEntry(name)?.let { return zip.getInputStream(it).use(::digest) }
+        }
+        return null
+    }
+
+    /** Player MUST be released first. Failure leaves the old native engine and disk pointer intact. */
+    fun activateStaged(context: Context): String {
+        require(validate(staged(context)) == "Compiled") {
+            "Source ZIP staged. Compile it with tools/build-engine-bundle.sh, then import the compiled ZIP. No APK rebuild needed."
+        }
+        val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull { it in abis } ?: error("Unsupported device ABI")
+        val generation = File(root(context), "engine-${java.util.UUID.randomUUID()}")
+        check(generation.mkdir()) { "Cannot create private engine directory" }
+        var activated = false
+        try {
+            ZipFile(staged(context)).use { zip ->
+                val entries = zip.entries().toList().filterNot { it.isDirectory }
+                fun match(name: String) = entries.singleOrNull { it.name.endsWith("lib/$abi/$name") }
+                val engine = match("libfrostsoulx_engine.so") ?: error("ZIP does not contain $abi")
+                for (name in listOf("libphonon.so", "libc++_shared.so")) {
+                    val dep = match(name)
+                    if (name == "libphonon.so") require(dep != null) { "Missing Steam Audio dependency" }
+                    if (dep != null) require(zip.getInputStream(dep).use(::digest) == installedDigest(context, "lib/$abi/$name")) {
+                        "$name differs from the installed host. Keep its SDK/runtime unchanged for engine-only swaps; changing it requires a host APK update."
+                    }
+                }
+                val library = File(generation, "libfrostsoulx_engine.so")
+                library.outputStream().use { out ->
+                    // Android dynamic-code-loading policy: make the inode read-only while
+                    // the already-open descriptor writes the validated bytes.
+                    check(library.setReadOnly()) { "Cannot protect native library" }
+                    zip.getInputStream(engine).use { copyBounded(it, out, EXPANDED_LIMIT) }
+                }
+            }
+            staged(context).inputStream().use { input -> File(generation, "bundle.zip").outputStream().use { copyBounded(input, it, ZIP_LIMIT) } }
+            val prefs = preferences(context)
+            check(prefs.edit().putBoolean("loading", true).commit()) { "Cannot save recovery marker" }
+            val error = NativeEngine.loadPlugin(File(generation, "libfrostsoulx_engine.so").absolutePath)
+            if (error.isNotEmpty()) {
+                prefs.edit().putBoolean("loading", false).commit()
+                error(error)
+            }
+            val old = activeDirectory(context)
+            // A disk failure after native activation must roll back the native instance too.
+            if (!prefs.edit().putString("active", generation.name).putBoolean("loading", false).commit()) {
+                NativeEngine.loadPlugin(old?.let { File(it, "libfrostsoulx_engine.so").absolutePath })
+                error("Could not persist engine selection; activation rolled back")
+            }
+            activated = true
+            old?.deleteRecursively()
+            return "Loaded $abi · C ABI v1 · ${generation.name.takeLast(8)}"
+        } finally { if (!activated) generation.deleteRecursively() }
+    }
+
+    fun restore(context: Context): String {
+        val prefs = preferences(context)
+        if (prefs.getBoolean("loading", false)) {
+            prefs.edit().remove("active").putBoolean("loading", false).commit()
+            return "Previous load was interrupted. Built-in engine restored; re-import only trusted binaries."
+        }
+        val active = activeDirectory(context) ?: return "Built-in engine · C ABI v1"
+        prefs.edit().putBoolean("loading", true).commit()
+        val error = NativeEngine.loadPlugin(File(active, "libfrostsoulx_engine.so").absolutePath)
+        if (error.isNotEmpty()) prefs.edit().remove("active").commit()
+        prefs.edit().putBoolean("loading", false).commit()
+        return if (error.isEmpty()) "Restored ${active.name.takeLast(8)}" else "Built-in fallback: $error"
+    }
+
+    fun unload(context: Context): String {
+        val error = NativeEngine.loadPlugin(null)
+        require(error.isEmpty()) { error }
+        val previous = activeDirectory(context)
+        check(preferences(context).edit().remove("active").putBoolean("loading", false).commit()) { "Could not persist built-in selection" }
+        previous?.deleteRecursively()
+        return "Imported engine unloaded · built-in engine restored"
     }
 
     private fun writeDocument(context: Context, uri: Uri, write: (OutputStream) -> Unit) {

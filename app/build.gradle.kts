@@ -14,7 +14,7 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
-        externalNativeBuild { cmake { cppFlags += "-std=c++17" } }
+        externalNativeBuild { cmake { cppFlags += "-std=c++17"; arguments += "-DANDROID_STL=c++_static" } }
     }
     buildFeatures { compose = true }
     externalNativeBuild { cmake { path = file("src/main/cpp/CMakeLists.txt") } }
@@ -39,6 +39,7 @@ val engineSdkAssets = layout.buildDirectory.dir("generated/engineSdkAssets")
 val prepareEngineSdkAssets by tasks.registering(Sync::class) {
     into(engineSdkAssets.map { it.dir("engine-sdk") })
     from("src/main/cpp/engine/include") { into("include") }
+    from("src/main/cpp/engine_api.h") { into("include") }
     from("src/main/cpp/engine/CMakeLists.txt")
     val importedLicense = file("src/main/cpp/engine/LICENSE.md")
     val sourceLicense = file("src/main/cpp/engine/third_party/steamaudio_sdk/LICENSE.md")

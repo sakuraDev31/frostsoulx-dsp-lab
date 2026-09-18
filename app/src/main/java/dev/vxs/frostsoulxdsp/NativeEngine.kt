@@ -4,6 +4,10 @@ object NativeEngine {
     private val loadResult = runCatching { System.loadLibrary("frostsoulx_dsp_lab") }
     val available = loadResult.isSuccess
     val loadError: String? = loadResult.exceptionOrNull()?.message
+    external fun nativeLoadPlugin(path: String?): String
+    external fun nativeStageNames(): Array<String>
+    fun loadPlugin(path: String?) = if (available) nativeLoadPlugin(path) else (loadError ?: "Native host unavailable")
+    fun stageNames() = if (available) nativeStageNames().toList() else emptyList()
     external fun nativePrepare(rate: Int, maxFrames: Int): Boolean
     external fun nativeSetEnabled(value: Boolean)
     external fun nativeSetIntensity(value: Float)
