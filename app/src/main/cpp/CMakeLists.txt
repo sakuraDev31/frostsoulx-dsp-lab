@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(frostsoulx_dsp_lab LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-add_library(frostsoulx_dsp_lab SHARED
-    lab_jni.cpp
-    engine/src/immersive_audio_engine.cpp)
-target_include_directories(frostsoulx_dsp_lab PRIVATE engine/include)
+add_subdirectory(engine)
+add_library(frostsoulx_dsp_lab SHARED lab_jni.cpp)
+target_compile_features(frostsoulx_dsp_lab PRIVATE cxx_std_17)
+target_link_libraries(frostsoulx_dsp_lab PRIVATE frostsoulx_engine)
 target_compile_options(frostsoulx_dsp_lab PRIVATE -Wall -Wextra -Wpedantic)
-# The imported bundle is source-controlled under engine/. For Steam Audio-enabled builds,
-# copy the matching libphonon.so into jniLibs/<ABI>/ and enable the backend definition.
+if(ANDROID)
+    target_link_options(frostsoulx_dsp_lab PRIVATE "-Wl,-z,max-page-size=16384")
+endif()

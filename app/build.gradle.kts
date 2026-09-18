@@ -9,6 +9,7 @@ android {
     ndkVersion = "28.2.13676358"
     defaultConfig {
         applicationId = "dev.vxs.frostsoulxdsp"
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         minSdk = 26
         targetSdk = 37
         versionCode = 1
