@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <vector>
+#include <chrono>
 
 #if defined(FROSTSOULX_STEAM_AUDIO_AVAILABLE)
 #include <phonon.h>
@@ -42,6 +43,9 @@ struct ImmersiveAudioEngine::Impl {
     static constexpr float kMaxReverbTimeSeconds = 8.0f;
     static constexpr float kMinReverbTimeSeconds = 0.2f;
 
+    bool diagnosticsEnabled = false;
+    std::uint64_t diagnosticCalls = 0;
+    StageDiagnostics diagnostics;
     int sampleRate = 0;
     int maxFrames = 0;
     int frameCapacity = 0;
@@ -422,6 +426,8 @@ bool ImmersiveAudioEngine::prepare(int sampleRate, int maxFrames) noexcept {
     if (sampleRate < 8000 || maxFrames <= 0) return false;
 
     impl_->release();
+    impl_->diagnostics = {};
+    impl_->diagnosticCalls = 0;
     impl_->sampleRate = sampleRate;
     impl_->maxFrames = maxFrames;
     impl_->frameCapacity = std::max(maxFrames, Impl::kSteamAudioFrameSize);
@@ -474,6 +480,9 @@ bool ImmersiveAudioEngine::prepare(int sampleRate, int maxFrames) noexcept {
 }
 
 void ImmersiveAudioEngine::reset() noexcept {
+    impl_->diagnostics = {}; impl_->diagnosticCalls = 0;
+    impl_->diagnostics = {};
+    impl_->diagnosticCalls = 0;
 #if defined(FROSTSOULX_STEAM_AUDIO_AVAILABLE)
     if (impl_->effect != nullptr) {
         iplBinauralEffectReset(impl_->effect);
@@ -550,7 +559,20 @@ int ImmersiveAudioEngine::lastEffectState() const noexcept {
     return impl_->lastState;
 }
 
+void ImmersiveAudioEngine::setDiagnosticsEnabled(bool enabled) noexcept {
+    if (impl_->diagnosticsEnabled != enabled) {
+        impl_->diagnostics = {};
+        impl_->diagnosticCalls = 0;
+    }
+    impl_->diagnosticsEnabled = enabled;
+}
+
+StageDiagnostics ImmersiveAudioEngine::stageDiagnostics() const noexcept {
+    return impl_->diagnostics;
+}
+
 bool ImmersiveAudioEngine::process(float* interleavedStereo, int frames) noexcept {
+    impl_->diagnostics.activeMask = 0;
     if (!impl_->prepared) {
         impl_->lastResult = ImmersiveProcessResult::NotPrepared;
         return false;
@@ -565,10 +587,24 @@ bool ImmersiveAudioEngine::process(float* interleavedStereo, int frames) noexcep
     }
 
 #if defined(FROSTSOULX_STEAM_AUDIO_AVAILABLE)
+    using Clock = std::chrono::steady_clock;
+    const bool profile = impl_->diagnosticsEnabled && (impl_->diagnosticCalls++ % 32 == 0);
+    const bool roomActive = impl_->roomPreset != RoomSimulationPreset::Off &&
+        impl_->roomMix * impl_->spatialBlend > kZeroEpsilon;
+    if (profile) {
+        impl_->diagnostics.milliseconds.fill(0.0);
+        ++impl_->diagnostics.profileSequence;
+    }
+    auto stamp = [&]() { return profile ? Clock::now() : Clock::time_point{}; };
+    auto elapsed = [&](Clock::time_point start, int stage) {
+        if (profile) impl_->diagnostics.milliseconds[stage] +=
+            std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+    };
     bool anyInputEnergy = false;
     bool anyOutputEnergy = false;
     int frameOffset = 0;
     while (frameOffset < frames) {
+        auto stageStart = stamp();
         const int activeFrames = std::min(Impl::kSteamAudioFrameSize, frames - frameOffset);
         const int steamFrames = Impl::kSteamAudioFrameSize;
         std::fill(impl_->inputLeft.begin(), impl_->inputLeft.begin() + steamFrames, 0.0f);
@@ -579,6 +615,9 @@ bool ImmersiveAudioEngine::process(float* interleavedStereo, int frames) noexcep
             impl_->inputLeft[static_cast<std::size_t>(frame)] = sanitizeInputSample(interleavedStereo[(frameOffset + frame) * 2]);
             impl_->inputRight[static_cast<std::size_t>(frame)] = sanitizeInputSample(interleavedStereo[(frameOffset + frame) * 2 + 1]);
         }
+
+        elapsed(stageStart, 0);
+        impl_->diagnostics.activeMask |= 1;
 
         IPLAudioBuffer input{};
         input.numChannels = 2;
@@ -596,7 +635,10 @@ bool ImmersiveAudioEngine::process(float* interleavedStereo, int frames) noexcep
         params.hrtf = impl_->hrtf;
         params.peakDelays = nullptr;
 
+        stageStart = stamp();
         const IPLAudioEffectState state = iplBinauralEffectApply(impl_->effect, &params, &input, &output);
+        elapsed(stageStart, 1);
+        impl_->diagnostics.activeMask |= 2;
         impl_->lastState = static_cast<int>(state);
         if (state != IPL_AUDIOEFFECTSTATE_TAILCOMPLETE && state != IPL_AUDIOEFFECTSTATE_TAILREMAINING) {
             impl_->lastResult = ImmersiveProcessResult::SteamAudioUnavailable;
@@ -618,8 +660,13 @@ bool ImmersiveAudioEngine::process(float* interleavedStereo, int frames) noexcep
                 return false;
             }
 
+            stageStart = stamp();
             impl_->applyRoomModel(outputLeft, outputRight);
+            if (roomActive) { elapsed(stageStart, 2); impl_->diagnostics.activeMask |= 4; }
+            stageStart = stamp();
             impl_->applyOutputLimiter(outputLeft, outputRight);
+            elapsed(stageStart, 3);
+            impl_->diagnostics.activeMask |= 8;
 
             if (!std::isfinite(outputLeft) || !std::isfinite(outputRight)) {
                 impl_->lastResult = ImmersiveProcessResult::InvalidOutput;

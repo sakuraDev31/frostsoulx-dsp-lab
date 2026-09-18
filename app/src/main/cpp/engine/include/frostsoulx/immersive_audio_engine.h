@@ -2,6 +2,10 @@
 
 #include <cstddef>
 #include <memory>
+#include <array>
+#include <cstdint>
+
+#define FROSTSOULX_DIAGNOSTICS_API 1
 
 namespace frostsoulx {
 
@@ -28,6 +32,15 @@ struct SpaceDesignControls {
     float roomSize = 0.5f;
     float dampening = 0.5f;
     float width = 0.5f;
+};
+
+// Read on the processing thread only, then publish a host-owned snapshot.
+// Timings are sampled every 32 process calls when explicitly enabled. No allocations.
+struct StageDiagnostics {
+    // Sanitize/deinterleave, Steam Audio HRTF, room model, output limiter.
+    std::array<double, 4> milliseconds{{-1, -1, -1, -1}};
+    unsigned activeMask = 0;
+    std::uint64_t profileSequence = 0;
 };
 
 class ImmersiveAudioEngine final {
@@ -64,6 +77,8 @@ public:
     ImmersiveProcessResult lastProcessResult() const noexcept;
     int lastEffectState() const noexcept;
     bool process(float* interleavedStereo, int frames) noexcept;
+    void setDiagnosticsEnabled(bool enabled) noexcept;
+    StageDiagnostics stageDiagnostics() const noexcept;
 
 private:
     struct Impl;
