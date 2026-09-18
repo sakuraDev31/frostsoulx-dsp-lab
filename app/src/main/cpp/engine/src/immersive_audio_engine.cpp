@@ -480,6 +480,7 @@ bool ImmersiveAudioEngine::prepare(int sampleRate, int maxFrames) noexcept {
 }
 
 void ImmersiveAudioEngine::reset() noexcept {
+    impl_->diagnostics = {}; impl_->diagnosticCalls = 0;
     impl_->diagnostics = {};
     impl_->diagnosticCalls = 0;
 #if defined(FROSTSOULX_STEAM_AUDIO_AVAILABLE)

@@ -7,11 +7,29 @@
 #include <mutex>
 #include <ctime>
 #include <vector>
-#include "frostsoulx/immersive_audio_engine.h"
+#include "engine_api.h"
+#include <dlfcn.h>
+#include <string>
+#include <cstring>
 
 namespace {
 constexpr int kMaxFrames = 16384, kWaveSize = 256, kPrefix = 40;
-frostsoulx::ImmersiveAudioEngine engine;
+const FxApi* api = nullptr;
+void* instance = nullptr;
+void* pluginHandle = nullptr;
+std::mutex engineMutex; // loader/lifecycle serialize; audio never waits
+std::array<std::array<char, 48>, FX_STAGE_COUNT> stageNames{};
+FxTelemetry telemetry{};
+bool initialize() {
+    if (!api) api = frostsoulx_get_api(FX_ABI_VERSION);
+    if (!instance && api) instance = api->create();
+    return instance != nullptr;
+}
+void readTelemetry() {
+    telemetry = {}; telemetry.size = sizeof(telemetry); telemetry.result = -1;
+    if (api->telemetry) api->telemetry(instance, &telemetry);
+    telemetry.stage_count = std::min(telemetry.stage_count, FX_STAGE_COUNT);
+}
 // UI only writes mailboxes. Engine lifecycle, setters and processing share the audio thread.
 std::array<std::atomic<float>, 10> controls{{0, 1, 2, .18f, .28f, 1.35f, .5f, .5f, .5f, 0}};
 std::array<float, 10> applied{};
@@ -31,37 +49,29 @@ double cpuMs() {
     return t.tv_sec * 1000.0 + t.tv_nsec / 1e6;
 }
 void applyControls() {
-    for (size_t i = 0; i < controls.size(); ++i) {
-        const float v = controls[i].load(std::memory_order_relaxed);
-        if (controlsApplied && v == applied[i]) continue;
-        switch (i) {
-            case 0: engine.setEnabled(v != 0); break;
-            case 1: engine.setSpatialBlend(v); break;
-            case 2: engine.setRoomSimulationPreset(static_cast<frostsoulx::RoomSimulationPreset>(int(v))); break;
-            case 3: engine.setRoomMix(v); break;
-            case 4: engine.setReflectionAmount(v); break;
-            case 5: engine.setReverbTimeSeconds(v); break;
-            case 6: engine.setRoomSize(v); break;
-            case 7: engine.setDampening(v); break;
-            case 8: engine.setStereoWidth(v); break;
-#if defined(FROSTSOULX_DIAGNOSTICS_API)
-            case 9: engine.setDiagnosticsEnabled(v != 0); break;
-#endif
-        }
-        applied[i] = v;
-    }
+    for (size_t i = 0; i < controls.size(); ++i) applied[i] = controls[i].load(std::memory_order_relaxed);
+    const FxControls c{uint32_t(applied[0] != 0), uint32_t(applied[9] != 0), int32_t(applied[2]),
+        applied[1], applied[3], applied[4], applied[5], applied[6], applied[7], applied[8]};
+    api->controls(instance, &c);
     controlsApplied = true;
 }
 void publish(const std::array<double, kPrefix + kWaveSize>& data) {
     std::unique_lock<std::mutex> lock(snapshotMutex, std::try_to_lock);
-    if (lock.owns_lock()) published = data;
+    if (lock.owns_lock()) {
+        published = data;
+        for (unsigned s = 0; s < FX_STAGE_COUNT; ++s) {
+            stageNames[s].fill(0);
+            if (s < telemetry.stage_count) std::memcpy(stageNames[s].data(), telemetry.stages[s].name, 47);
+        }
+    }
 }
 bool process(float* data, int frames) {
-    if (!data || frames <= 0 || sampleRate <= 0) return false;
+    std::unique_lock<std::mutex> lock(engineMutex, std::try_to_lock);
+    if (!lock.owns_lock() || !instance || !data || frames <= 0 || sampleRate <= 0) return false;
     const double cpuStart = cpuMs();
     applyControls();
     if (resetRequested.exchange(false)) {
-        engine.reset(); calls = inputClips = outputClips = invalidSamples = 0;
+        api->reset(instance); calls = inputClips = outputClips = invalidSamples = 0;
         profileFrames = 0; lastProfileSequence = 0;
     }
     std::array<double, kPrefix + kWaveSize> d{};
@@ -74,24 +84,18 @@ bool process(float* data, int frames) {
         float* block = data + offset * 2;
         std::copy_n(block, n * 2, original.data());
         const auto start = Clock::now();
-        const bool processed = engine.process(block, n);
+        const bool processed = api->process(instance, block, n);
         processMs += ms(Clock::now() - start);
         // A native error must never leak a partially processed buffer.
         if (!processed) std::copy_n(original.data(), n * 2, block);
         ok = ok && processed;
-#if defined(FROSTSOULX_DIAGNOSTICS_API)
-        const auto stages = engine.stageDiagnostics();
-        stageMask |= stages.activeMask;
-        for (int s = 0; s < 4; ++s) d[28 + s] = stages.milliseconds[s];
-        d[33] = double(stages.profileSequence);
-        if (stages.profileSequence != lastProfileSequence) {
-            profileFrames = n;
-            lastProfileSequence = stages.profileSequence;
+        readTelemetry();
+        for (unsigned s = 0; s < FX_STAGE_COUNT; ++s) {
+            d[28 + s] = s < telemetry.stage_count ? telemetry.stages[s].milliseconds : -1;
+            if (s < telemetry.stage_count && telemetry.stages[s].enabled) stageMask |= 1u << s;
         }
-#else
-        for (int s = 0; s < 4; ++s) d[28 + s] = -1;
-        d[33] = -1;
-#endif
+        d[33] = telemetry.stage_count ? double(telemetry.profile_sequence) : -1;
+        profileFrames = telemetry.profile_frames;
         for (int i = 0; i < n * 2; ++i) {
             const int ch = i % 2;
             float in = original[i], out = block[i];
@@ -112,8 +116,8 @@ bool process(float* data, int frames) {
     d[8] = frames * 1000.0 / sampleRate;
     const double cpuEnd = cpuMs();
     d[7] = cpuStart < 0 || cpuEnd < 0 ? -1 : (cpuEnd - cpuStart) / d[8] * 100;
-    d[9] = frostsoulx::ImmersiveAudioEngine::kPreferredQuantumFrames * 1000.0 / sampleRate;
-    d[10] = double(engine.lastProcessResult()); d[11] = stageMask;
+    d[9] = telemetry.quantum_frames ? telemetry.quantum_frames * 1000.0 / sampleRate : -1;
+    d[10] = double(telemetry.result); d[11] = stageMask;
     d[12] = double(inputClips); d[13] = double(outputClips); d[14] = double(invalidSamples); d[15] = maxDiff;
     for (int ch = 0; ch < 2; ++ch) {
         d[16 + ch] = peak[ch]; d[18 + ch] = std::sqrt(energy[ch] / frames);
@@ -121,7 +125,7 @@ bool process(float* data, int frames) {
         d[24 + ch] = sum[ch] / frames; d[26 + ch] = sum[ch + 2] / frames;
     }
     const int waveFrames = std::min(frames, kWaveSize);
-    d[32] = waveFrames; d[34] = engine.isPrepared();
+    d[32] = waveFrames; d[34] = telemetry.prepared;
     d[35] = ms(Clock::now().time_since_epoch());
     d[36] = profileFrames; d[37] = applied[9]; d[38] = applied[0];
     for (int i = 0; i < waveFrames; ++i) {
@@ -138,10 +142,13 @@ void control(int index, float value, float lo, float hi) {
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_dev_vxs_frostsoulxdsp_NativeEngine_nativePrepare(JNIEnv*, jclass, jint rate, jint) {
+    std::lock_guard<std::mutex> lock(engineMutex);
+    if (!initialize()) return JNI_FALSE;
     sampleRate = rate; calls = inputClips = outputClips = invalidSamples = 0;
     controlsApplied = false; profileFrames = 0; lastProfileSequence = 0;
-    const bool ready = engine.prepare(rate, kMaxFrames);
+    const bool ready = api->prepare(instance, rate, kMaxFrames);
     applyControls();
+    readTelemetry();
     std::array<double, kPrefix + kWaveSize> d{};
     d[0] = 1; d[2] = rate; d[4] = kMaxFrames; d[5] = 2; d[34] = ready;
     publish(d);
@@ -189,4 +196,61 @@ Java_dev_vxs_frostsoulxdsp_NativeEngine_nativeProcessDirect(JNIEnv* env, jclass,
     const jlong capacity = env->GetDirectBufferCapacity(buffer);
     if (!data || capacity < 0 || static_cast<jlong>(frames) * 8 > capacity) return JNI_FALSE;
     return process(data, frames);
+}
+
+// The caller releases Media3 before replacement. Keep the previous instance until the
+// candidate passes ABI validation AND prepare. No C++ symbols cross this boundary.
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_vxs_frostsoulxdsp_NativeEngine_nativeLoadPlugin(JNIEnv* env, jclass, jstring path) {
+    std::string location;
+    if (path) {
+        const char* chars = env->GetStringUTFChars(path, nullptr);
+        if (!chars) return nullptr;
+        location = chars; env->ReleaseStringUTFChars(path, chars);
+    }
+    std::lock_guard<std::mutex> lock(engineMutex);
+    void* handle = nullptr;
+    const FxApi* candidate = nullptr;
+    if (location.empty()) candidate = frostsoulx_get_api(FX_ABI_VERSION);
+    else {
+        handle = dlopen(location.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (!handle) { const char* error = dlerror(); return env->NewStringUTF(error ? error : "dlopen failed"); }
+        const auto getApi = reinterpret_cast<FxGetApi>(dlsym(handle, "frostsoulx_get_api"));
+        if (getApi) candidate = getApi(FX_ABI_VERSION);
+    }
+    if (!candidate || candidate->version != FX_ABI_VERSION || candidate->size != sizeof(FxApi) ||
+        !candidate->create || !candidate->destroy || !candidate->prepare || !candidate->reset ||
+        !candidate->controls || !candidate->process) {
+        if (handle) dlclose(handle);
+        return env->NewStringUTF("Incompatible engine C ABI (expected v1)");
+    }
+    void* next = candidate->create();
+    if (!next || !candidate->prepare(next, sampleRate > 0 ? sampleRate : 48000, kMaxFrames)) {
+        if (next) candidate->destroy(next);
+        if (handle) dlclose(handle);
+        return env->NewStringUTF("Engine prepare failed; previous engine retained");
+    }
+    if (instance) api->destroy(instance);
+    if (pluginHandle) dlclose(pluginHandle);
+    api = candidate; instance = next; pluginHandle = handle;
+    controlsApplied = false; calls = inputClips = outputClips = invalidSamples = 0;
+    profileFrames = 0; lastProfileSequence = 0; sampleRate = 0;
+    applyControls(); readTelemetry();
+    // The prepare above is only a compatibility probe, NOT a playback measurement.
+    publish({});
+    return env->NewStringUTF("");
+}
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_dev_vxs_frostsoulxdsp_NativeEngine_nativeStageNames(JNIEnv* env, jclass) {
+    std::array<std::array<char, 48>, FX_STAGE_COUNT> copy;
+    { std::lock_guard<std::mutex> lock(snapshotMutex); copy = stageNames; }
+    jclass strings = env->FindClass("java/lang/String");
+    if (!strings) return nullptr;
+    auto result = env->NewObjectArray(FX_STAGE_COUNT, strings, nullptr);
+    if (!result) return nullptr;
+    for (unsigned s = 0; s < FX_STAGE_COUNT; ++s) {
+        auto name = env->NewStringUTF(copy[s].data());
+        env->SetObjectArrayElement(result, s, name); env->DeleteLocalRef(name);
+    }
+    return result;
 }
