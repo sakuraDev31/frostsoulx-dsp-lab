@@ -73,7 +73,13 @@ def check_manifest(root):
         return  # legacy source bundles remain supported
     data = json.loads(manifest.read_text())
     require(data.get('format') == 1, 'Unsupported engine bundle format')
-    for relative, digest in data.get('sha256', {}).items():
+    checksums = data.get('sha256', {})
+    require(isinstance(checksums, dict) and checksums, 'Missing checksums')
+    if data.get('kind') == 'compiled':
+        require(data.get('engine_api') == 1, 'Compiled bundles need C plugin ABI v1')
+        require(all(str(p.relative_to(manifest.parent)) in checksums for p in manifest.parent.rglob('*')
+                    if p.is_file() and p != manifest), 'Unhashed compiled payload')
+    for relative, digest in checksums.items():
         path = (manifest.parent / relative).resolve()
         require(path.is_relative_to(manifest.parent.resolve()) and path.is_file(), 'Invalid manifest path')
         require(hashlib.sha256(path.read_bytes()).hexdigest() == digest, f'Checksum mismatch: {relative}')
@@ -121,6 +127,7 @@ def import_bundle(source):
                     copy(found[0], staged / 'lib' / abi / name)
             license_file = unique(incoming, 'LICENSE.md')
             copy(license_file, staged / 'LICENSE.md')
+            copy(unique(incoming, 'engine_api.h'), staged / 'include/engine_api.h')
             kind = 'compiled'
         # Validate all inputs before swapping the live tree; roll back on rename failure.
         backup = temp / 'previous'
@@ -130,7 +137,7 @@ def import_bundle(source):
         except BaseException:
             backup.rename(ENGINE)
             raise
-        print(f'Imported {kind} engine for arm64-v8a and x86_64. Rebuild the APK to activate.')
+        print(f'Imported {kind} engine. For native-only iteration use tools/build-engine-bundle.sh and import its ZIP in the lab.')
 
 
 def export_bundle(output, native_dir):
@@ -138,7 +145,8 @@ def export_bundle(output, native_dir):
     require(output.is_relative_to(ROOT) and output.suffix == '.zip', 'Output must be a .zip inside the workspace')
     require(output.parent.is_dir(), 'Output parent directory must exist')
     files = {'include/frostsoulx/immersive_audio_engine.h': ENGINE / 'include/frostsoulx/immersive_audio_engine.h',
-             'CMakeLists.txt': ENGINE / 'CMakeLists.txt'}
+             'CMakeLists.txt': ENGINE / 'CMakeLists.txt',
+             'include/engine_api.h': ENGINE.parent / 'engine_api.h'}
     sdk = ENGINE / 'third_party/steamaudio_sdk'
     if not sdk.is_dir():
         sdk = SDK
@@ -154,11 +162,12 @@ def export_bundle(output, native_dir):
                 files[f'lib/{abi}/{name}'] = path
         files['LICENSE.md'] = ENGINE / 'LICENSE.md' if (ENGINE / 'LICENSE.md').exists() else sdk / 'LICENSE.md'
     else:
+        files['engine_plugin.cpp'] = ENGINE.parent / 'engine_plugin.cpp'
         files['src/immersive_audio_engine.cpp'] = ENGINE / 'src/immersive_audio_engine.cpp'
         for path in sdk.rglob('*'):
             if path.is_file():
                 files['third_party/steamaudio_sdk/' + path.relative_to(sdk).as_posix()] = path
-    manifest = {'format': 1, 'kind': kind, 'abis': list(ABIS), 'activation': 'rebuild-required',
+    manifest = {'format': 1, 'kind': kind, 'abis': list(ABIS), 'activation': 'runtime-plugin' if native_dir else 'compile-engine-only', 'engine_api': 1,
                 'sha256': {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in files.items()}}
     with tempfile.NamedTemporaryFile(prefix='.engine-export-', dir=ROOT, delete=False) as f:
         temporary = Path(f.name)
