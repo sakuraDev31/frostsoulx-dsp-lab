@@ -1,0 +1,9 @@
+/build/
+.gradle/
+.idea/
+local.properties
+app/build/
+app/.cxx/
+*.hprof
+*.log
+.DS_Store
