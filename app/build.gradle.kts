@@ -33,3 +33,17 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.10.1")
     implementation("androidx.media3:media3-session:1.10.1")
 }
+
+// Tiny SDK metadata assets enable exporting the installed engine independently of the lab.
+val engineSdkAssets = layout.buildDirectory.dir("generated/engineSdkAssets")
+val prepareEngineSdkAssets by tasks.registering(Sync::class) {
+    into(engineSdkAssets.map { it.dir("engine-sdk") })
+    from("src/main/cpp/engine/include") { into("include") }
+    from("src/main/cpp/engine/CMakeLists.txt")
+    val importedLicense = file("src/main/cpp/engine/LICENSE.md")
+    val sourceLicense = file("src/main/cpp/engine/third_party/steamaudio_sdk/LICENSE.md")
+    from(if (importedLicense.exists()) importedLicense else if (sourceLicense.exists()) sourceLicense
+        else rootProject.file("engine-bundle/third_party/steamaudio_sdk/LICENSE.md"))
+}
+android.sourceSets.getByName("main").assets.srcDir(engineSdkAssets)
+tasks.named("preBuild").configure { dependsOn(prepareEngineSdkAssets) }
