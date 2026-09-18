@@ -77,7 +77,7 @@ class LabViewModel : androidx.lifecycle.ViewModel() {
         val saved = prefs.getStringSet("retained_uris", emptySet()) ?: emptySet()
         prefs.edit().putStringSet("retained_uris", saved + result.map { it.uri.toString() }).apply()
     }
-    fun play(context: Context, track: LocalTrack) { selected = track; player?.release(); processor.enabled = enabled && !offloadRequested; player = ExoPlayer.Builder(context, LabRenderersFactory(context, processor)).build().also { it.setMediaItem(MediaItem.fromUri(track.uri)); it.prepare(); applyOffload(it, offloadRequested); it.play() }; NativeEngine.prepare(48000, 384); engineStatus = "Ready · ${if (offloadRequested) "offload requested; custom DSP bypassed" else "custom processor path"}" }
+    fun play(context: Context, track: LocalTrack) { selected = track; player?.release(); processor.enabled = enabled && !offloadRequested; player = ExoPlayer.Builder(context, LabRenderersFactory(context, processor)).build().also { it.setMediaItem(MediaItem.fromUri(track.uri)); it.prepare(); applyOffload(it, offloadRequested); it.play() }; engineStatus = "Ready · ${if (offloadRequested) "offload requested; custom DSP bypassed" else "custom processor path"}" }
     fun toggle() { enabled = !enabled; processor.enabled = enabled && !offloadRequested; NativeEngine.setEnabled(enabled); engineStatus = if (enabled && !offloadRequested) "DSP enabled · PCM processor active" else if (enabled) "DSP enabled in controls · bypassed while offload is requested" else "DSP disabled · original path requested" }
     fun updateIntensity(v: Float) { intensity = v; NativeEngine.setIntensity(v) }
     fun updateRoomMix(v: Float) { roomMix = v; NativeEngine.setRoomMix(v) }
@@ -101,7 +101,10 @@ class LabViewModel : androidx.lifecycle.ViewModel() {
         }
     }
     fun importBundle(context: Context, uri: Uri) { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); context.getSharedPreferences("dsp_lab", Context.MODE_PRIVATE).edit().putString("engine_bundle_uri", uri.toString()).apply(); importStatus = "Imported bundle staged: $uri · rebuild required to activate native code" }
-    fun refreshDiagnostics() { diagnostics = NativeEngine.diagnostics() }
+    fun refreshDiagnostics() {
+        val d = NativeEngine.diagnostics()
+        if (d.size >= 40) diagnostics = doubleArrayOf(d[18], d[22], d[16], d[20], d[15], d[1], d[10])
+    }
     override fun onCleared() { player?.release() }
 }
 
@@ -132,32 +135,3 @@ class LabViewModel : androidx.lifecycle.ViewModel() {
 @Composable private fun SliderRow(label: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) { Column { Row { Text(label, Modifier.weight(1f)); Text("%.3f".format(Locale.US, value), color = Color.Gray) }; Slider(value = value, onValueChange = onChange, valueRange = range) } }
 @Composable private fun PresetRow(vm: LabViewModel) { val names = listOf("Off", "Small", "Studio", "Hall", "Cathedral", "Subway"); Column { Text("Room preset", color = Color.Gray); Row(Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) { names.forEachIndexed { i, name -> FilterChip(selected = vm.preset == i, onClick = { vm.updatePreset(i) }, label = { Text(name) }) } } } }
 private fun formatMs(ms: Long) = "%d:%02d".format(ms / 60000, (ms / 1000) % 60)
-
-object NativeEngine {
-    init { System.loadLibrary("frostsoulx_dsp_lab") }
-    external fun nativePrepare(rate: Int, maxFrames: Int): Boolean
-    external fun nativeSetEnabled(value: Boolean)
-    external fun nativeSetIntensity(value: Float)
-    external fun nativeSetRoomPreset(value: Int)
-    external fun nativeSetRoomMix(value: Float)
-    external fun nativeSetReflectionAmount(value: Float)
-    external fun nativeSetReverbTime(value: Float)
-    external fun nativeSetRoomSize(value: Float)
-    external fun nativeSetDampening(value: Float)
-    external fun nativeSetWidth(value: Float)
-    external fun nativeDiagnostics(): DoubleArray
-    external fun nativeProcess(pcm: FloatArray): Boolean
-    external fun nativeProcessDirect(buffer: java.nio.ByteBuffer, frames: Int): Boolean
-    fun prepare(rate: Int, frames: Int) = nativePrepare(rate, frames)
-    fun setEnabled(v: Boolean) = nativeSetEnabled(v)
-    fun setIntensity(v: Float) = nativeSetIntensity(v)
-    fun setRoomPreset(v: Int) = nativeSetRoomPreset(v)
-    fun setRoomMix(v: Float) = nativeSetRoomMix(v)
-    fun setReflectionAmount(v: Float) = nativeSetReflectionAmount(v)
-    fun setReverbTime(v: Float) = nativeSetReverbTime(v)
-    fun setRoomSize(v: Float) = nativeSetRoomSize(v)
-    fun setDampening(v: Float) = nativeSetDampening(v)
-    fun setWidth(v: Float) = nativeSetWidth(v)
-    fun diagnostics() = nativeDiagnostics()
-    fun processDirect(buffer: java.nio.ByteBuffer, frames: Int) = nativeProcessDirect(buffer, frames)
-}
