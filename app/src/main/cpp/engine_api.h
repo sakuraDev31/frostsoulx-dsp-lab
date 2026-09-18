@@ -10,10 +10,10 @@
 extern "C" {
 #endif
 #define FX_ABI_VERSION 1u
-#define FX_STAGE_COUNT 5u
+#define FX_STAGE_COUNT 4u
 
 typedef struct FxControls {
-    uint32_t enabled;
+    uint32_t enabled, profiling;
     int32_t preset;
     float intensity, room_mix, reflection, reverb_seconds, room_size, dampening, width;
 } FxControls;
@@ -27,7 +27,8 @@ typedef struct FxStage {
 typedef struct FxTelemetry {
     uint32_t size;
     int32_t result;
-    uint32_t stage_count;
+    uint32_t stage_count, prepared, quantum_frames, profile_frames;
+    uint64_t profile_sequence;
     FxStage stages[FX_STAGE_COUNT];
 } FxTelemetry;
 
