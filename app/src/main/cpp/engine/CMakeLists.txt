@@ -1,12 +1,28 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(frostsoulx_engine LANGUAGES CXX)
 # Independent compiled engine: no JNI, Media3 or Android UI dependencies.
+# A validated compiled ZIP may replace sources; the host still owns JNI.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/lib/${ANDROID_ABI}/libfrostsoulx_engine.so")
+    add_library(phonon SHARED IMPORTED GLOBAL)
+    set_target_properties(phonon PROPERTIES IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/lib/${ANDROID_ABI}/libphonon.so")
+    add_library(frostsoulx_engine SHARED IMPORTED GLOBAL)
+    set_target_properties(frostsoulx_engine PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/lib/${ANDROID_ABI}/libfrostsoulx_engine.so"
+        INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        INTERFACE_LINK_LIBRARIES phonon)
+    return()
+endif()
 add_library(frostsoulx_engine SHARED src/immersive_audio_engine.cpp)
 target_compile_features(frostsoulx_engine PUBLIC cxx_std_17)
 target_include_directories(frostsoulx_engine PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:include>)
 target_compile_options(frostsoulx_engine PRIVATE -Wall -Wextra -Wpedantic)
-set(FROSTSOULX_STEAM_SDK "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../engine-bundle/third_party/steamaudio_sdk" CACHE PATH "Steam Audio SDK")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/steamaudio_sdk/include/phonon.h")
+    set(DEFAULT_STEAM_SDK "${CMAKE_CURRENT_SOURCE_DIR}/third_party/steamaudio_sdk")
+else()
+    set(DEFAULT_STEAM_SDK "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../engine-bundle/third_party/steamaudio_sdk")
+endif()
+set(FROSTSOULX_STEAM_SDK "${DEFAULT_STEAM_SDK}" CACHE PATH "Steam Audio SDK")
 if(ANDROID)
     if(ANDROID_ABI STREQUAL "arm64-v8a")
         set(STEAM_ARCH android-armv8)
@@ -27,4 +43,8 @@ if(ANDROID)
     target_link_options(frostsoulx_engine PRIVATE "-Wl,-z,max-page-size=16384")
 endif()
 install(TARGETS frostsoulx_engine LIBRARY DESTINATION lib/${ANDROID_ABI})
+if(ANDROID)
+    install(FILES "${STEAM_LIBRARY}" DESTINATION lib/${ANDROID_ABI})
+    install(FILES "${FROSTSOULX_STEAM_SDK}/LICENSE.md" DESTINATION .)
+endif()
 install(DIRECTORY include/ DESTINATION include)
