@@ -107,8 +107,17 @@ sq = np.tile(np.concatenate([np.ones(30), -np.ones(30)]), 400)[:, None] * np.arr
 lim_sq = run({"gain": 6}, sq.astype(np.float32))
 check("limiter holds on square-wave bursts", np.max(np.abs(lim_sq)) <= 0.9801, f"peak {np.max(np.abs(lim_sq)):.4f}")
 
+# --- optional partitioned convolution ---
+impulse = np.zeros((FS, 2), np.float32); impulse[0] = (0.4, 0.2)
+conv_off = run({"convolution_mix": 0}, impulse)
+conv_on = run({"convolution_mix": 1}, impulse)
+check("convolution bypass is transparent", np.max(np.abs(conv_off - run({}, impulse))) < 1e-6)
+check("convolution mix produces an IR tail", rms(conv_on[300:2000]) > 1e-4, f"tail rms {rms(conv_on[300:2000]):.4f}")
+conv_damped = run({"convolution_mix": 1, "convolution_damping": 1}, impulse)
+check("convolution damping changes output", rms(conv_damped - conv_on) > 1e-5)
+
 # --- robustness ---
-extreme = {"bass": 12, "treble": 12, "width": 2, "crossfeed": 1, "reverb_mix": 1, "reverb_room": 1, "gain": 6}
+extreme = {"bass": 12, "treble": 12, "width": 2, "crossfeed": 1, "reverb_mix": 1, "reverb_room": 1, "convolution_mix": 1, "convolution_predelay": 1, "convolution_damping": 1, "gain": 6}
 for blk in (1, 7, 64, 4096):
     y = run(extreme, noise[:8000], block=blk)
     check(f"no NaN/inf, extreme params, block {blk}", bool(np.all(np.isfinite(y))) and np.max(np.abs(y)) <= 0.9801)
@@ -146,7 +155,11 @@ check("manifest: preset ids all exist", all(k in ids for pr in m["presets"] for 
 probe = (rng.standard_normal((FS, 2)) * 0.08).astype(np.float32)
 probe[:, 1] *= 0.5
 defaults = {p["id"]: p["default"] for p in m["params"]}
-needs = {"reverb_room": {"reverb_mix": 0.5}}    # only audible while the reverb is mixed in
+needs = {
+    "reverb_room": {"reverb_mix": 0.5},
+    "convolution_predelay": {"convolution_mix": 0.7},
+    "convolution_damping": {"convolution_mix": 0.7},
+}    # wet-only parameters need their path enabled
 for p in m["params"]:
     if p["id"] == "limiter": continue           # only audible when clipping
     base_p = {**defaults, **needs.get(p["id"], {})}
