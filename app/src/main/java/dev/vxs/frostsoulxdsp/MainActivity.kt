@@ -99,6 +99,7 @@ class LabViewModel : androidx.lifecycle.ViewModel() {
     var isPlaying by mutableStateOf(false); private set
     var positionMs by mutableLongStateOf(0L); private set
     var durationMs by mutableLongStateOf(0L); private set
+    // Only two top-level pages: DSP tuning and song library.
     var screen by mutableIntStateOf(0)
     var appCpuPercent by mutableFloatStateOf(0f); private set
     private var player: ExoPlayer? = null
@@ -178,7 +179,7 @@ class LabViewModel : androidx.lifecycle.ViewModel() {
     LaunchedEffect(Unit) { while (true) { vm.tick(); kotlinx.coroutines.delay(350) } }
     MaterialTheme(colorScheme = darkColorScheme(background = Ink, surface = CardInk, primary = Accent, onPrimary = Ink)) {
         Surface(Modifier.fillMaxSize(), color = Ink) { Box(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize()) { when (vm.screen) { 0 -> TuningScreen(vm, context, bundleLauncher); 1 -> LibraryScreen(vm, context); else -> DiagnosticsScreen(vm) }
+            Column(Modifier.fillMaxSize()) { when (vm.screen) { 0 -> TuningScreen(vm, context, bundleLauncher); else -> LibraryScreen(vm, context) }
                 Spacer(Modifier.height(if (vm.selected != null) 92.dp else 64.dp)); BottomNav(vm)
             }
             if (vm.selected != null) MiniPlayer(vm)
@@ -209,8 +210,15 @@ class LabViewModel : androidx.lifecycle.ViewModel() {
             item { LabCard { Text("Engine bundle", fontSize = 17.sp, fontWeight = FontWeight.SemiBold); Text(vm.importStatus, color = if (vm.engineBundleReady) Green else Muted, fontSize = 12.sp); Button(onClick = { bundleLauncher.launch(arrayOf("application/zip", "application/octet-stream")) }, modifier = Modifier.padding(top = 8.dp)) { Text("Validate engine ZIP") }; Text("A validated source bundle is activated on the next APK build; Android cannot compile C++ source or hot-swap a loaded native library at runtime.", color = Muted, fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp)) } }
             item { LabCard { Text("Output path", fontSize = 17.sp, fontWeight = FontWeight.SemiBold); Row(verticalAlignment = Alignment.CenterVertically) { Switch(checked = vm.offloadRequested, onCheckedChange = vm::setOffload); Text("Request hardware offload", Modifier.padding(start = 8.dp), fontSize = 13.sp) } } }
         }
-        item { ActionPill("Open live diagnostics", "Meters, callback load, chain state") { vm.screen = 2 } }
-    }
+            if (advanced) {
+                item { Text("Live diagnostics", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp)) }
+                item { TelemetryHero(vm) }
+                item { MeterCard(vm.telemetry) }
+                item { ScopeCard(vm.levelHistory) }
+                item { ChainCard(vm) }
+                item { MetricsGrid(vm) }
+            }
+        }
 }
 
 @Composable private fun DiagnosticsScreen(vm: LabViewModel) {
@@ -242,7 +250,7 @@ class LabViewModel : androidx.lifecycle.ViewModel() {
 
 @Composable private fun MiniPlayer(vm: LabViewModel) { Surface(Modifier.padding(horizontal = 14.dp).fillMaxWidth().height(68.dp), shape = RoundedCornerShape(20.dp), color = Color(0xFF242424), tonalElevation = 2.dp) { Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(42.dp).clip(RoundedCornerShape(11.dp)).background(Color(0xFF3A3A3A)), contentAlignment = Alignment.Center) { Text("♪", color = Color.White, fontSize = 20.sp) }; Column(Modifier.padding(start = 10.dp).weight(1f)) { Text(vm.selected?.title ?: "No track", maxLines = 1, fontWeight = FontWeight.SemiBold); Text(if (vm.isPlaying) "Playing · ${formatMs(vm.positionMs)}" else "Paused", color = Muted, fontSize = 11.sp) }; TextButton(onClick = { if (vm.isPlaying) vm.togglePlayback() else vm.resume() }) { Text(if (vm.isPlaying) "Pause" else "Play") } } } }
 
-@Composable private fun BottomNav(vm: LabViewModel) { NavigationBar(containerColor = Ink, tonalElevation = 0.dp) { NavigationBarItem(selected = vm.screen == 0, onClick = { vm.screen = 0 }, icon = { Text("DSP") }, label = { Text("Tune") }); NavigationBarItem(selected = vm.screen == 1, onClick = { vm.screen = 1 }, icon = { Text("LIB") }, label = { Text("Library") }); NavigationBarItem(selected = vm.screen == 2, onClick = { vm.screen = 2 }, icon = { Text("OSC") }, label = { Text("Live") }) } }
+@Composable private fun BottomNav(vm: LabViewModel) { NavigationBar(containerColor = Ink, tonalElevation = 0.dp) { NavigationBarItem(selected = vm.screen == 0, onClick = { vm.screen = 0 }, icon = { Text("DSP") }, label = { Text("Tune") }); NavigationBarItem(selected = vm.screen == 1, onClick = { vm.screen = 1 }, icon = { Text("LIB") }, label = { Text("Library") }) } }
 @Composable private fun StatusPill(vm: LabViewModel) { Surface(shape = RoundedCornerShape(50), color = if (vm.enabled && !vm.bypass) Color(0xFF183323) else Raised) { Text(if (vm.enabled && !vm.bypass) "DSP ON" else "BYPASS", color = if (vm.enabled && !vm.bypass) Green else Muted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp)) } }
 @Composable private fun ActionPill(title: String, subtitle: String, onClick: () -> Unit) { Surface(Modifier.clickable(onClick = onClick), shape = RoundedCornerShape(14.dp), color = CardInk) { Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp)) { Text(title, fontSize = 12.sp, fontWeight = FontWeight.SemiBold); Text(subtitle, color = Muted, fontSize = 10.sp) } } }
 @Composable private fun EmptyState() { LabCard { Text("No indexed audio", fontWeight = FontWeight.SemiBold); Text("Grant audio access and scan the device library.", color = Muted, fontSize = 12.sp) } }
