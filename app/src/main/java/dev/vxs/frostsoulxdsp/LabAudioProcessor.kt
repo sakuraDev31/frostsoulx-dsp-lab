@@ -4,6 +4,7 @@ import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessor
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.min
 
 class LabAudioProcessor : AudioProcessor {
     private var format = AudioProcessor.AudioFormat.NOT_SET
@@ -16,6 +17,7 @@ class LabAudioProcessor : AudioProcessor {
         if (!supported) return AudioProcessor.AudioFormat.NOT_SET
         format = inputAudioFormat
         NativeEngine.prepare(inputAudioFormat.sampleRate, 384)
+        NativeEngine.applyState()
         return inputAudioFormat
     }
     override fun isActive() = format != AudioProcessor.AudioFormat.NOT_SET
@@ -26,7 +28,19 @@ class LabAudioProcessor : AudioProcessor {
         output.limit(count)
         output.put(inputBuffer)
         output.flip()
-        if (enabled && output.isDirect) NativeEngine.processDirect(output, count / 8)
+        if (enabled && output.isDirect) {
+            val frames = count / 8
+            var offsetFrames = 0
+            while (offsetFrames < frames) {
+                val chunkFrames = min(384, frames - offsetFrames)
+                val chunk = output.duplicate().order(ByteOrder.nativeOrder()).apply {
+                    position(offsetFrames * 8)
+                    limit((offsetFrames + chunkFrames) * 8)
+                }.slice().order(ByteOrder.nativeOrder())
+                NativeEngine.processDirect(chunk, chunkFrames)
+                offsetFrames += chunkFrames
+            }
+        }
         output.position(0)
     }
     override fun queueEndOfStream() { ended = true }
