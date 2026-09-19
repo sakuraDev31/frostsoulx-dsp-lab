@@ -1,58 +1,98 @@
-# FrostSoulX DSP Lab
+# Resonance
 
-A tiny Android playground for testing the FrostSoulX native audio engine without rebuilding the full music app.
+A small Android music player with a **sound engine you import as a zip**.
 
-## What it does
+- Scans music on the device (MediaStore) and saves every song's path in `library.json`, so the library is there on the next launch. A quick rescan runs at startup.
+- Plays in the background (Media3 `MediaSessionService`, notification controls).
+- **Playing** tab: cover art, seek/transport, and an orb that pulses with the real output level (left channel Tide, right channel Rose).
+- **Sound** tab: import an engine zip; every control the engine declares shows up as a fader / switch / choice, plus its presets. Nothing in the UI is hard-coded to one engine.
+- Engine audio runs inside ExoPlayer's audio processor chain, on the audio thread.
 
-- Scans device audio through `MediaStore.Audio.Media`.
-- Stores stable `content://` URIs in app preferences so discovered files survive rescans and reboots.
-- Plays local files through Media3 ExoPlayer.
-- Routes float stereo PCM through a `Media3 AudioProcessor` and the imported native engine.
-- Exposes every current public engine control: enable, intensity, room preset, room mix, reflection amount, reverb time, room size, dampening, and stereo width.
-- Shows native status, input/output RMS, peaks, process calls, and result code.
-- Imports an engine ZIP through the system document picker and stages it for the next native build.
-- Supports Media3 hardware offload preferences, while explicitly bypassing the custom processor when offload is requested.
+## Build (no laptop needed)
 
-## Important offload rule
+1. Push this folder to a GitHub repo.
+2. GitHub Actions (`.github/workflows/build.yml`) builds two artifacts:
+   - `resonance-debug-apk` - the app (`app-debug.apk`)
+   - `reference-engine` - `reference-engine.zip`, a working engine to import
+3. GitHub downloads artifacts as a zip that contains your file. The app accepts that too: if the zip you pick has no `manifest.json` but contains one `.zip`, it unpacks that one.
 
-Hardware audio offload and a custom PCM processor are mutually exclusive. When offload is enabled, the lab requests Media3 offload and disables the custom processor. When DSP is enabled, the lab disables offload so the PCM engine can actually receive samples. The UI reports this state instead of claiming that both paths are active.
+Gradle is pinned to 8.9 in the workflow (AGP 8.7.3, Kotlin 2.0.21, Media3 1.4.1, minSdk 29).
 
-## Engine import workflow
+## Engine zip format
 
-The default engine source is under:
-
-```text
-app/src/main/cpp/engine/
+```
+my-engine.zip
+  manifest.json
+  lib/arm64-v8a/libmyengine.so        <- the engine (entry)
+  lib/arm64-v8a/libphonon.so          <- optional extra libs it depends on
+  lib/x86_64/...                      <- optional
 ```
 
-It is copied from `sakuraDev31/frostsoulx-audio-engine`. To replace it with a new source bundle:
+`manifest.json`:
 
-```bash
-./tools/import-engine-bundle.sh path/to/frostsoulx-audio-engine.zip
-./gradlew :app:assembleDebug --no-daemon
+```json
+{
+  "id": "my.engine",              // letters, digits . _ -
+  "name": "My Engine",
+  "version": "1.0.0",
+  "api": 1,
+  "description": "shown on the Sound tab",
+  "entry": "libmyengine.so",
+  "preload": ["libphonon.so"],    // optional; loaded first, in this order
+  "params": [
+    { "id": "bass", "label": "Bass", "group": "Tone", "type": "slider",
+      "min": -12, "max": 12, "default": 0, "step": 0.5, "unit": "dB" },
+    { "id": "limiter", "label": "Limiter", "group": "Output", "type": "toggle", "default": 1 },
+    { "id": "room", "label": "Room", "group": "Space", "type": "choice",
+      "options": ["Off", "Small", "Hall"], "default": 0 }
+  ],
+  "presets": [
+    { "name": "Warm", "values": { "bass": 4, "room": 1 } }
+  ]
+}
 ```
 
-The in-app ZIP picker persists the selected URI and marks it as staged. Native code cannot be hot-swapped safely inside a running APK; a rebuild is required to activate an imported engine. This is intentional and prevents ABI/library races.
+- `slider` passes its real value, `toggle` passes 0 or 1, `choice` passes the option index.
+- Double-tap a fader to reset it to `default`.
+- Only the library for the phone's own ABI is extracted. `arm64-v8a` covers modern phones.
 
-## Build
+## Engine C ABI (`engine-sdk/ae_plugin.h`)
 
-The sandbox build needs Android SDK, NDK `28.2.13676358`, and CMake. Then:
-
-```bash
-printf 'sdk.dir=/absolute/path/to/android-sdk\n' > local.properties
-./gradlew :app:assembleDebug --no-daemon
+```c
+int        ae_abi_version(void);                              // return 1
+AeEngine*  ae_create(int sample_rate, int channels);          // channels is 2; NULL = unsupported
+void       ae_destroy(AeEngine*);
+void       ae_set_param(AeEngine*, const char* id, float v);  // ignore unknown ids
+void       ae_process(AeEngine*, float* interleaved, int frames);  // in place, stereo float
+void       ae_reset(AeEngine*);                               // on seek / track change
 ```
 
-The build artifact is:
+All calls for one instance come from the audio thread, so the engine needs no locking. The app clamps output to [-1, 1] and replaces NaN with 0.
 
-```text
-app/build/outputs/apk/debug/app-debug.apk
+### Wrapping an existing engine (e.g. the Steam Audio one)
+
+Write a thin shim `.so` that exports these six functions and forwards to your engine, then list `libphonon.so` under `preload`. The bridge `dlopen`s preload libraries first so the shim's dependency on `libphonon.so` resolves. Keep `ae_process` allocation-free and keep block sizes small: a slow `ae_process` stalls ExoPlayer's playback thread (play/pause and seek will lag).
+
+## Reference engine
+
+`reference-engine/` is plain C++17: bass/treble shelves, mid/side width, headphone crossfeed, a small reverb, output gain and a look-ahead limiter (no clipping from stacked effects). Each of its 8 parameters is in its manifest.
+
+Host tests (no Android needed, needs g++, python3, numpy):
+
+```
+reference-engine/tools/run_host_tests.sh
 ```
 
-## Research decisions
+They build the engine plus the bridge core, load the engine through `dlopen` exactly as the app does, and check filter gains, width, crossfeed, reverb, limiter ceiling, NaN safety at extreme settings and odd block sizes/sample rates, and that every manifest parameter audibly changes the output.
 
-Android’s `MediaStore` is used for device audio discovery because it returns indexed media and stable content URIs. The app retains URI grants and the URI strings rather than assuming raw filesystem paths. The custom processor accepts only two-channel float PCM, which keeps the test path explicit and avoids silently processing unsupported formats. Hardware offload is controlled through Media3’s `AudioOffloadPreferences`; because offload bypasses `AudioProcessor` chains on supported devices, the two modes are mutually exclusive.
+## What is not verified
 
-## Scope
+The Kotlin/Compose app and the JNI glue have not been compiled or run: the environment this was written in had no Android SDK. The engine, the bridge core and the manifest were tested on a host (see above). Expect to fix a few compile errors on the first CI run; the first place to look is `PlaybackService.kt` if you change the Media3 version, since Media3's audio APIs shift between releases.
 
-This is a test harness, not a production player. The native processor is expected to remain allocation-free in its callback. The JNI direct-buffer path is used for playback; diagnostics are intentionally lightweight and are not part of the FrostSoulX production adapter.
+Also untested on a real device: loading a `.so` from app-private storage with `dlopen` (should work; it is how plugin `.so` files are normally loaded), and playback with the engine on gapless track changes.
+
+## Known limits
+
+- Stereo PCM16 / float only. Other formats bypass the engine.
+- The engine instance is created on the first audio buffer (and again when the sample rate changes). An engine with slow start-up will delay the start of playback slightly.
+- No queue editing, playlists or tag editing. Library is a flat list with search.
