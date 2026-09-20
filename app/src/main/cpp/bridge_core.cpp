@@ -35,6 +35,13 @@ struct Bridge {
     int fifoRead = 0;
     int fifoWrite = 0;
     int fifoCount = 0;
+
+    // Measured dropouts: frames the FIFO could not supply and had to zero-fill. Plain int,
+    // only ever touched by the audio thread (the JNI layer reads it from the same thread,
+    // immediately after processing), so no atomics and no synchronisation are needed.
+    unsigned int fifoUnderflowFrames = 0;
+    // ae_process() invocations during the current bridge_process_quantized() call.
+    int invocations = 0;
 };
 
 template <typename F>
@@ -189,6 +196,7 @@ static void processChunk(Bridge* b, float* data, int frames) {
         consumed += take;
         if (b->inFill == q) {
             b->process(b->inst, b->inBuf.data(), q);
+            ++b->invocations;
             fifoPush(b, b->inBuf.data(), q);
             b->inFill = 0;
         }
@@ -202,22 +210,29 @@ static void processChunk(Bridge* b, float* data, int frames) {
         if (have > 0) fifoPop(b, data, have);
         std::memset(data + static_cast<size_t>(have) * 2, 0,
                     static_cast<size_t>(frames - have) * 2 * sizeof(float));
+        b->fifoUnderflowFrames += static_cast<unsigned int>(frames - have);
     }
 }
 
-void bridge_process_quantized(Bridge* b, float* data, int frames) {
-    if (!b || !b->inst || !data || frames <= 0) return;
+int bridge_process_quantized(Bridge* b, float* data, int frames) {
+    if (!b || !b->inst || !data || frames <= 0) return 0;
     if (b->quantum <= 0 || b->fifoCapacity <= 0) {
         // AUTO: the engine sees the host block size directly, no FIFO, no added latency.
         b->process(b->inst, data, frames);
-        return;
+        return 1;
     }
     // Note: there is deliberately no "frames == quantum" shortcut. Once the FIFO is primed it
     // holds the stream's delay, so skipping it for one block would duplicate/drop audio.
+    b->invocations = 0;
     int done = 0;
     while (done < frames) {
         const int chunk = std::min(frames - done, b->maxHostFrames);
         processChunk(b, data + static_cast<size_t>(done) * 2, chunk);
         done += chunk;
     }
+    return b->invocations;
+}
+
+unsigned int bridge_fifo_underflow_frames(const Bridge* b) {
+    return b ? b->fifoUnderflowFrames : 0u;
 }

@@ -78,10 +78,14 @@ enum Slot : int {
     S_BENCH_STDDEV_NS,
     S_BENCH_RT_RATIO,
     S_BENCH_DEADLINE_MISSES,
-    S_FIFO_UNDERFLOWS,
+    S_FIFO_UNDERFLOWS,      // frames the quantum FIFO had to zero-fill (audio thread)
     S_LOUDNESS_BLOCKS,
     S_TRUE_PEAK_HOLD_DB,
     S_RESET_COUNT,
+    S_SINK_UNDERRUNS,       // AnalyticsListener.onAudioUnderrun count (Media3)
+    S_SINK_UNDERRUN_MS,     // elapsedSinceLastFeedMs of the most recent sink underrun
+    S_SINK_ERRORS,          // AnalyticsListener.onAudioSinkError count
+    S_SINK_BUFFER_FRAMES,   // AudioTrack buffer size in frames, from onAudioTrackInitialized
     S_SLOT_COUNT,
 };
 
@@ -108,6 +112,10 @@ void recordBlock(int64_t startNs, int64_t endNs, int frames);
 // Records one host audio callback (may contain several engine blocks).
 void recordCallback(int hostFrames);
 
+// Publishes the quantum FIFO's zero-fill counter (see bridge_fifo_underflow_frames).
+// Absolute value, not a delta: the bridge owns the counter, telemetry only mirrors it.
+void setFifoUnderflowFrames(uint32_t frames);
+
 // Output measurement + sanitation: replaces NaN/Inf with 0 and clamps to [-1, 1] in place,
 // counts clipped samples, updates levels, stereo maths, K-weighted loudness and feeds the
 // analyzer ring buffer. This is the only pass over the output block.
@@ -130,8 +138,22 @@ void benchmarkStop();
 bool benchmarkRunning();
 
 // ---- external counters (reported by the Kotlin side) -------------------------------------
+//
+// These come from Media3's AnalyticsListener on a normal thread, never from the audio
+// callback, and are kept separate from the FIFO counter above so the report can tell a
+// sink-level dropout apart from a DSP-level one.
 
-void noteUnderrun();
+// One AnalyticsListener.onAudioUnderrun event. `elapsedSinceLastFeedMs` is the value the
+// callback supplies; pass a negative number when it is unknown.
+void noteSinkUnderrun(int64_t elapsedSinceLastFeedMs);
+
+// One AnalyticsListener.onAudioSinkError event.
+void noteSinkError();
+
+// AudioTrack buffer size, from AnalyticsListener.onAudioTrackInitialized.
+void setSinkBufferFrames(int frames);
+
 uint32_t fifoUnderflows();
+uint32_t sinkUnderruns();
 
 }  // namespace telemetry

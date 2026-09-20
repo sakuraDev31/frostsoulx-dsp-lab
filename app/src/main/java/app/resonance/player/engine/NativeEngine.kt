@@ -54,6 +54,17 @@ object NativeEngine {
     external fun nativeBenchmarkStart(durationMs: Long)
     external fun nativeBenchmarkStop()
 
-    /** Reported by the playback layer when the audio sink signals a dropout. */
-    external fun nativeNoteUnderrun()
+    // --- audio sink telemetry ----------------------------------------------------------------
+    // Fed by Media3's AnalyticsListener from the player's application thread, never from the
+    // audio callback. Kept apart from the quantum FIFO's own underflow counter so a sink-level
+    // dropout can be told apart from a DSP-level one.
+
+    /** One `AnalyticsListener.onAudioUnderrun`. Pass a negative value if the time is unknown. */
+    external fun nativeNoteSinkUnderrun(elapsedSinceLastFeedMs: Long)
+
+    /** One `AnalyticsListener.onAudioSinkError`. */
+    external fun nativeNoteSinkError()
+
+    /** AudioTrack buffer size in frames, from `AnalyticsListener.onAudioTrackInitialized`. */
+    external fun nativeSetSinkBufferFrames(frames: Int)
 }

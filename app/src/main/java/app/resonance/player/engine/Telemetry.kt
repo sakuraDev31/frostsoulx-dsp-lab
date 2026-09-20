@@ -72,7 +72,11 @@ object Slot {
     const val LOUDNESS_BLOCKS = 60
     const val TRUE_PEAK_HOLD_DB = 61
     const val RESET_COUNT = 62
-    const val COUNT = 63
+    const val SINK_UNDERRUNS = 63
+    const val SINK_UNDERRUN_MS = 64
+    const val SINK_ERRORS = 65
+    const val SINK_BUFFER_FRAMES = 66
+    const val COUNT = 67
 }
 
 /** dB value the native side uses for "nothing measured yet". */
@@ -139,7 +143,15 @@ data class AudioTelemetry(
     val peakMagDb: Double = SILENCE_DB,
     val spectralRmsDb: Double = SILENCE_DB,
     val spectralCentroidHz: Double = 0.0,
-    val underruns: Long = 0,
+    /** Frames the quantum FIFO had to zero-fill: a dropout inside the DSP path. */
+    val fifoUnderflowFrames: Long = 0,
+    /** `onAudioUnderrun` events from Media3's audio sink: a dropout below the DSP path. */
+    val sinkUnderruns: Long = 0,
+    /** Time since the sink was last fed at the most recent underrun; negative = unknown. */
+    val sinkUnderrunMs: Double = -1.0,
+    val sinkErrors: Long = 0,
+    /** AudioTrack buffer size in frames, reported when the track is initialised. */
+    val sinkBufferFrames: Int = 0,
     val benchActive: Boolean = false,
     val bench: BenchmarkResult = BenchmarkResult(),
     val available: Boolean = false,
@@ -153,6 +165,17 @@ data class AudioTelemetry(
         get() = if (sampleRate > 0 && blockFrames > 0) blockFrames * 1_000_000.0 / sampleRate else 0.0
 
     val latencyMs: Double get() = if (sampleRate > 0) latencyFrames * 1000.0 / sampleRate else 0.0
+
+    /** Milliseconds of audio the quantum FIFO had to replace with silence. */
+    val fifoUnderflowMs: Double
+        get() = if (sampleRate > 0) fifoUnderflowFrames * 1000.0 / sampleRate else 0.0
+
+    /** Sink buffer depth in milliseconds; null when the sink has not reported a size. */
+    val sinkBufferMs: Double?
+        get() = if (sampleRate > 0 && sinkBufferFrames > 0) sinkBufferFrames * 1000.0 / sampleRate else null
+
+    /** True when any layer has reported a dropout since the last reset. */
+    val hasDropouts: Boolean get() = fifoUnderflowFrames > 0 || sinkUnderruns > 0 || sinkErrors > 0
 
     val outPeakDbL: Double get() = amplitudeToDb(outPeakL)
     val outPeakDbR: Double get() = amplitudeToDb(outPeakR)
@@ -213,7 +236,11 @@ data class AudioTelemetry(
             peakMagDb = s[Slot.PEAK_MAG_DB],
             spectralRmsDb = s[Slot.SPECTRAL_RMS_DB],
             spectralCentroidHz = s[Slot.SPECTRAL_CENTROID_HZ],
-            underruns = s[Slot.FIFO_UNDERFLOWS].toLong(),
+            fifoUnderflowFrames = s[Slot.FIFO_UNDERFLOWS].toLong(),
+            sinkUnderruns = s[Slot.SINK_UNDERRUNS].toLong(),
+            sinkUnderrunMs = s[Slot.SINK_UNDERRUN_MS],
+            sinkErrors = s[Slot.SINK_ERRORS].toLong(),
+            sinkBufferFrames = s[Slot.SINK_BUFFER_FRAMES].toInt(),
             benchActive = s[Slot.BENCH_ACTIVE] > 0.5,
             bench = BenchmarkResult(
                 blocks = s[Slot.BENCH_BLOCKS].toLong(),
@@ -317,9 +344,22 @@ fun buildDiagnostics(t: AudioTelemetry, device: DeviceMetrics, engineLoaded: Boo
             "Worst block (${formatNs(t.procMaxNs)}) was ${"%.0f".format(t.procMaxNs / t.procAvgNs)}x " +
                 "the average (${formatNs(t.procAvgNs)}). Usually a scheduler preemption.")
     }
-    if (t.underruns > 0) {
+    if (t.sinkUnderruns > 0) {
+        val when_ = if (t.sinkUnderrunMs >= 0)
+            " Last one after ${"%.0f".format(t.sinkUnderrunMs)} ms without a write." else ""
         out += Diagnostic(Severity.WARNING, "Audio sink underrun",
-            "${t.underruns} dropout(s) reported by the audio sink.")
+            "${t.sinkUnderruns} dropout(s) reported by Media3's audio sink.$when_ " +
+                "This is below the DSP path: the sink ran dry waiting to be fed.")
+    }
+    if (t.fifoUnderflowFrames > 0) {
+        out += Diagnostic(Severity.ERROR, "Quantum FIFO underflow",
+            "${t.fifoUnderflowFrames} frame(s) (${"%.1f".format(t.fifoUnderflowMs)} ms) were " +
+                "output as silence because the engine had not produced them yet. " +
+                "Lower the processing quantum or use a lighter engine.")
+    }
+    if (t.sinkErrors > 0) {
+        out += Diagnostic(Severity.ERROR, "Audio sink error",
+            "${t.sinkErrors} error(s) reported by the audio sink while writing to AudioTrack.")
     }
     if (t.live && abs(t.balance) > 0.35) {
         out += Diagnostic(Severity.INFO, "Channel imbalance",
@@ -340,7 +380,7 @@ fun buildDiagnostics(t: AudioTelemetry, device: DeviceMetrics, engineLoaded: Boo
 
     if (out.none { it.severity != Severity.INFO } && t.dspRunning) {
         out += Diagnostic(Severity.INFO, "Nominal",
-            "No clipping, no non-finite samples, no missed deadlines.")
+            "No clipping, no non-finite samples, no missed deadlines, no dropouts.")
     }
     return out
 }

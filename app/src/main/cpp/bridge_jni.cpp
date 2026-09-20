@@ -80,21 +80,31 @@ Java_app_resonance_player_engine_NativeEngine_nativeProcess(JNIEnv* env, jobject
     telemetry::analyzeInput(data, frames);
 
     const int64_t t0 = telemetry::nowNs();
-    bridge_process_quantized(b, data, frames);
+    const int invocations = bridge_process_quantized(b, data, frames);
     const int64_t t1 = telemetry::nowNs();
 
-    // Time is attributed to the engine block size that actually ran.
+    // Time is attributed to the engine block size that actually ran. `invocations` is what
+    // the bridge really did rather than a guess from frames/quantum: with a quantum larger
+    // than the host block most callbacks run the engine zero times and one runs it once, so
+    // guessing would both invent blocks and mis-size their deadline budget.
     const int q = bridge_quantum(b);
-    const int blockFrames = (q > 0 && q <= frames) ? q : frames;
-    const int invocations = (q > 0 && q <= frames) ? (frames / q) : 1;
-    if (invocations > 1) {
+    const int blockFrames = q > 0 ? q : frames;
+    if (invocations == 1) {
+        telemetry::recordBlock(t0, t1, blockFrames);
+    } else if (invocations > 1) {
+        // Several engine calls inside one timed span: split it evenly. The total is exact;
+        // only the per-call split is approximate, and the deadline budget stays correct
+        // because each share is compared against one quantum's worth of wall time.
         const int64_t per = (t1 - t0) / invocations;
         for (int i = 0; i < invocations; ++i) {
             telemetry::recordBlock(t0 + per * i, t0 + per * (i + 1), blockFrames);
         }
-    } else {
-        telemetry::recordBlock(t0, t1, blockFrames);
     }
+    // invocations == 0: the callback only drained the FIFO, so there is no engine block to
+    // time. The frames still reach the output measurement below.
+
+    // Mirror the bridge's own zero-fill counter; same thread, one relaxed store.
+    telemetry::setFifoUnderflowFrames(bridge_fifo_underflow_frames(b));
 
     telemetry::analyzeOutputAndSanitize(data, frames);
 }
@@ -214,9 +224,23 @@ Java_app_resonance_player_engine_NativeEngine_nativeBenchmarkStop(JNIEnv*, jobje
     telemetry::benchmarkStop();
 }
 
+// --- audio sink telemetry (Media3 AnalyticsListener, never the audio thread) ---------------
+
 JNIEXPORT void JNICALL
-Java_app_resonance_player_engine_NativeEngine_nativeNoteUnderrun(JNIEnv*, jobject) {
-    telemetry::noteUnderrun();
+Java_app_resonance_player_engine_NativeEngine_nativeNoteSinkUnderrun(JNIEnv*, jobject,
+                                                                     jlong elapsedSinceLastFeedMs) {
+    telemetry::noteSinkUnderrun(elapsedSinceLastFeedMs);
+}
+
+JNIEXPORT void JNICALL
+Java_app_resonance_player_engine_NativeEngine_nativeNoteSinkError(JNIEnv*, jobject) {
+    telemetry::noteSinkError();
+}
+
+JNIEXPORT void JNICALL
+Java_app_resonance_player_engine_NativeEngine_nativeSetSinkBufferFrames(JNIEnv*, jobject,
+                                                                        jint frames) {
+    telemetry::setSinkBufferFrames(frames);
 }
 
 }  // extern "C"
