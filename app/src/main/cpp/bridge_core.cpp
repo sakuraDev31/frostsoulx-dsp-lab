@@ -2,6 +2,10 @@
 
 #include <dlfcn.h>
 
+#include <algorithm>
+#include <cstring>
+#include <vector>
+
 #ifdef __ANDROID__
 #include <android/log.h>
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "ResonanceBridge", __VA_ARGS__)
@@ -20,6 +24,17 @@ struct Bridge {
     void (*process)(void*, float*, int) = nullptr;
     void (*reset)(void*) = nullptr;
     void* inst = nullptr;
+
+    // Internal DSP quantum re-blocking. All sizes are in stereo frames.
+    int quantum = 0;          // 0 = follow host block size
+    int maxHostFrames = 0;
+    std::vector<float> inBuf;   // quantum frames, interleaved stereo
+    int inFill = 0;
+    std::vector<float> fifo;    // ring of processed frames
+    int fifoCapacity = 0;       // frames
+    int fifoRead = 0;
+    int fifoWrite = 0;
+    int fifoCount = 0;
 };
 
 template <typename F>
@@ -86,4 +101,123 @@ void bridge_process(Bridge* b, float* data, int frames) {
 
 void bridge_reset(Bridge* b) {
     if (b && b->inst) b->reset(b->inst);
+    bridge_flush_fifo(b);
+}
+
+// --- quantum re-blocking -------------------------------------------------------------------
+
+void bridge_flush_fifo(Bridge* b) {
+    if (!b) return;
+    b->inFill = 0;
+    b->fifoRead = 0;
+    b->fifoWrite = 0;
+    b->fifoCount = 0;
+    if (b->quantum > 0 && !b->fifo.empty()) {
+        // Re-prime with `quantum` frames of silence: keeps output available from the first block.
+        std::fill(b->fifo.begin(), b->fifo.end(), 0.0f);
+        b->fifoWrite = b->quantum * 2;
+        b->fifoCount = b->quantum;
+    }
+}
+
+bool bridge_set_quantum(Bridge* b, int quantumFrames, int maxHostFrames) {
+    if (!b) return false;
+    if (quantumFrames <= 0) {
+        b->quantum = 0;
+        b->maxHostFrames = 0;
+        b->inBuf.clear();
+        b->inBuf.shrink_to_fit();
+        b->fifo.clear();
+        b->fifo.shrink_to_fit();
+        b->fifoCapacity = 0;
+        bridge_flush_fifo(b);
+        return true;
+    }
+    const int host = std::max(maxHostFrames, quantumFrames);
+    const int capacity = quantumFrames * 3 + host;
+    try {
+        b->inBuf.assign(static_cast<size_t>(quantumFrames) * 2, 0.0f);
+        b->fifo.assign(static_cast<size_t>(capacity) * 2, 0.0f);
+    } catch (...) {
+        b->quantum = 0;
+        b->fifoCapacity = 0;
+        b->inBuf.clear();
+        b->fifo.clear();
+        return false;
+    }
+    b->quantum = quantumFrames;
+    b->maxHostFrames = host;
+    b->fifoCapacity = capacity;
+    bridge_flush_fifo(b);
+    return true;
+}
+
+int bridge_quantum(const Bridge* b) { return b ? b->quantum : 0; }
+
+int bridge_latency_frames(const Bridge* b) { return (b && b->quantum > 0) ? b->quantum : 0; }
+
+static inline void fifoPush(Bridge* b, const float* src, int frames) {
+    for (int i = 0; i < frames; ++i) {
+        b->fifo[static_cast<size_t>(b->fifoWrite)] = src[2 * i];
+        b->fifo[static_cast<size_t>(b->fifoWrite) + 1] = src[2 * i + 1];
+        b->fifoWrite += 2;
+        if (b->fifoWrite >= b->fifoCapacity * 2) b->fifoWrite = 0;
+    }
+    b->fifoCount += frames;
+}
+
+static inline void fifoPop(Bridge* b, float* dst, int frames) {
+    for (int i = 0; i < frames; ++i) {
+        dst[2 * i] = b->fifo[static_cast<size_t>(b->fifoRead)];
+        dst[2 * i + 1] = b->fifo[static_cast<size_t>(b->fifoRead) + 1];
+        b->fifoRead += 2;
+        if (b->fifoRead >= b->fifoCapacity * 2) b->fifoRead = 0;
+    }
+    b->fifoCount -= frames;
+}
+
+// Re-blocks one chunk that is guaranteed to fit the FIFO (chunk <= maxHostFrames).
+static void processChunk(Bridge* b, float* data, int frames) {
+    const int q = b->quantum;
+    int consumed = 0;
+    while (consumed < frames) {
+        const int take = std::min(q - b->inFill, frames - consumed);
+        std::memcpy(b->inBuf.data() + static_cast<size_t>(b->inFill) * 2,
+                    data + static_cast<size_t>(consumed) * 2,
+                    static_cast<size_t>(take) * 2 * sizeof(float));
+        b->inFill += take;
+        consumed += take;
+        if (b->inFill == q) {
+            b->process(b->inst, b->inBuf.data(), q);
+            fifoPush(b, b->inBuf.data(), q);
+            b->inFill = 0;
+        }
+    }
+
+    if (b->fifoCount >= frames) {
+        fifoPop(b, data, frames);
+    } else {
+        // Cannot happen with the priming in bridge_flush_fifo, but never read stale memory.
+        const int have = b->fifoCount;
+        if (have > 0) fifoPop(b, data, have);
+        std::memset(data + static_cast<size_t>(have) * 2, 0,
+                    static_cast<size_t>(frames - have) * 2 * sizeof(float));
+    }
+}
+
+void bridge_process_quantized(Bridge* b, float* data, int frames) {
+    if (!b || !b->inst || !data || frames <= 0) return;
+    if (b->quantum <= 0 || b->fifoCapacity <= 0) {
+        // AUTO: the engine sees the host block size directly, no FIFO, no added latency.
+        b->process(b->inst, data, frames);
+        return;
+    }
+    // Note: there is deliberately no "frames == quantum" shortcut. Once the FIFO is primed it
+    // holds the stream's delay, so skipping it for one block would duplicate/drop audio.
+    int done = 0;
+    while (done < frames) {
+        const int chunk = std::min(frames - done, b->maxHostFrames);
+        processChunk(b, data + static_cast<size_t>(done) * 2, chunk);
+        done += chunk;
+    }
 }

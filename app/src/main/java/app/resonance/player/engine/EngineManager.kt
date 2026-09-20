@@ -20,9 +20,16 @@ import java.util.zip.ZipFile
 object EngineManager {
     val processor = EngineProcessor()
 
+    /** Quantum values the DSP Lab offers. 0 is AUTO (engine follows the host block size). */
+    val QUANTUM_OPTIONS = intArrayOf(0, 128, 256, 384, 512, 768, 1024)
+
     private var initialized = false
     private lateinit var app: Context
     private lateinit var prefs: SharedPreferences
+
+    /** Created in [init]; drives the DSP Lab's analyzer thread. */
+    lateinit var telemetry: TelemetryHub
+        private set
 
     private val _installed = MutableStateFlow<List<InstalledEngine>>(emptyList())
     val installed: StateFlow<List<InstalledEngine>> = _installed.asStateFlow()
@@ -36,6 +43,10 @@ object EngineManager {
     private val _enabled = MutableStateFlow(true)
     val enabled: StateFlow<Boolean> = _enabled.asStateFlow()
 
+    /** Requested internal DSP quantum in frames; 0 = AUTO. */
+    private val _quantum = MutableStateFlow(0)
+    val quantum: StateFlow<Int> = _quantum.asStateFlow()
+
     val message = MutableStateFlow<String?>(null)
 
     @Synchronized
@@ -44,9 +55,12 @@ object EngineManager {
         initialized = true
         app = context.applicationContext
         prefs = app.getSharedPreferences("engine", Context.MODE_PRIVATE)
+        telemetry = TelemetryHub(app)
         processor.onError = { msg -> message.value = "Engine error: $msg" }
         _enabled.value = prefs.getBoolean("enabled", true)
         processor.bypass = !_enabled.value
+        _quantum.value = prefs.getInt("quantum", 0)
+        processor.requestQuantum(_quantum.value)
 
         // Leftovers from an interrupted import.
         File(app.filesDir, "engines").listFiles()?.forEach {
@@ -88,6 +102,20 @@ object EngineManager {
         _enabled.value = on
         processor.bypass = !on
         prefs.edit().putBoolean("enabled", on).apply()
+    }
+
+    /**
+     * Sets the internal DSP processing quantum in frames (0 = AUTO).
+     *
+     * Switching allocates the re-blocking FIFO, so the processor applies it at the next safe
+     * boundary between buffers with the engine's tails flushed, rather than mid-block. The
+     * change is therefore audible as a brief re-sync at worst, never as a torn buffer.
+     */
+    fun setQuantum(frames: Int) {
+        if (frames !in QUANTUM_OPTIONS.toList()) return
+        _quantum.value = frames
+        processor.requestQuantum(frames)
+        prefs.edit().putInt("quantum", frames).apply()
     }
 
     fun dismissMessage() {
