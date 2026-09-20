@@ -2,7 +2,7 @@ name: Build FrostSoulX DSP Lab
 
 on:
   push:
-    branches: [main , genspark ai developer]
+    branches: [main, genspark_ai_developer]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -12,7 +12,8 @@ permissions:
 
 env:
   JAVA_VERSION: '17'
-  ANDROID_NDK_VERSION: '28.2.13676358'
+  # AGP 8.7.3's default NDK; matches what the build asks for, so nothing is downloaded mid-build.
+  ANDROID_NDK_VERSION: '26.1.10909125'
   ANDROID_CMAKE_VERSION: '3.22.1'
 
 jobs:
@@ -34,14 +35,10 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: |
-            platform-tools
-            platforms;android-37
-            build-tools;36.0.0
-            ndk;${{ env.ANDROID_NDK_VERSION }}
-            cmake;${{ env.ANDROID_CMAKE_VERSION }}
-          accept-android-sdk-license: true
-          log-accepted-android-sdk-licenses: false
+          # One space-separated line: setup-android passes this string to sdkmanager as-is, so a
+          # multi-line YAML block turns into a single bogus package name.
+          packages: 'platform-tools platforms;android-35 build-tools;34.0.0 ndk;${{ env.ANDROID_NDK_VERSION }} cmake;${{ env.ANDROID_CMAKE_VERSION }}'
+          accept-android-sdk-licenses: true
 
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
