@@ -1,9 +1,9 @@
-/build/
 .gradle/
-.idea/
+build/
 local.properties
-app/build/
-app/.cxx/
-*.hprof
-*.log
-.DS_Store
+*.iml
+.idea/
+.cxx/
+*.apk
+/pkg/
+/build-*/

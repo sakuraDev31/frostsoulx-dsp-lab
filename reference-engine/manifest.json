@@ -1,0 +1,31 @@
+{
+  "id": "resonance.reference",
+  "name": "Reference Engine",
+  "version": "1.0.0",
+  "api": 1,
+  "description": "Tone shelves, stereo width, headphone crossfeed, reverb, optional low-latency IR convolution and a look-ahead limiter.",
+  "entry": "libref_engine.so",
+  "params": [
+    { "id": "bass", "label": "Bass", "group": "Tone", "type": "slider", "min": -12, "max": 12, "default": 0, "step": 0.5, "unit": "dB" },
+    { "id": "treble", "label": "Treble", "group": "Tone", "type": "slider", "min": -12, "max": 12, "default": 0, "step": 0.5, "unit": "dB" },
+
+    { "id": "width", "label": "Stereo width", "group": "Space", "type": "slider", "min": 0, "max": 2, "default": 1, "step": 0.01, "unit": "x" },
+    { "id": "crossfeed", "label": "Crossfeed", "group": "Space", "type": "slider", "min": 0, "max": 1, "default": 0, "step": 0.01 },
+    { "id": "reverb_mix", "label": "Reverb mix", "group": "Space", "type": "slider", "min": 0, "max": 1, "default": 0, "step": 0.01 },
+    { "id": "reverb_room", "label": "Room size", "group": "Space", "type": "slider", "min": 0, "max": 1, "default": 0.5, "step": 0.01 },
+
+    { "id": "convolution_mix", "label": "IR convolution mix", "group": "Convolution", "type": "slider", "min": 0, "max": 1, "default": 0, "step": 0.01 },
+    { "id": "convolution_predelay", "label": "IR pre-delay", "group": "Convolution", "type": "slider", "min": 0, "max": 1, "default": 0, "step": 0.01, "unit": "0–20 ms" },
+    { "id": "convolution_damping", "label": "IR damping", "group": "Convolution", "type": "slider", "min": 0, "max": 1, "default": 0, "step": 0.01 },
+
+    { "id": "gain", "label": "Output gain", "group": "Output", "type": "slider", "min": -12, "max": 6, "default": 0, "step": 0.5, "unit": "dB" },
+    { "id": "limiter", "label": "Limiter", "group": "Output", "type": "toggle", "default": 1 }
+  ],
+  "presets": [
+    { "name": "Flat", "values": { "bass": 0, "treble": 0, "width": 1, "crossfeed": 0, "reverb_mix": 0, "reverb_room": 0.5, "convolution_mix": 0, "convolution_predelay": 0, "convolution_damping": 0, "gain": 0, "limiter": 1 } },
+    { "name": "Cinema", "values": { "bass": 4, "treble": 2, "width": 1.4, "crossfeed": 0.25, "reverb_mix": 0.18, "reverb_room": 0.6, "convolution_mix": 0.12, "convolution_predelay": 0.15, "convolution_damping": 0.2, "gain": -1, "limiter": 1 } },
+    { "name": "Club", "values": { "bass": 7, "treble": 1, "width": 1.15, "crossfeed": 0, "reverb_mix": 0.1, "reverb_room": 0.35, "convolution_mix": 0.05, "convolution_predelay": 0, "convolution_damping": 0.35, "gain": -2, "limiter": 1 } },
+    { "name": "Wide", "values": { "bass": 1, "treble": 1.5, "width": 1.6, "crossfeed": 0.15, "reverb_mix": 0.22, "reverb_room": 0.7, "convolution_mix": 0.16, "convolution_predelay": 0.25, "convolution_damping": 0.15, "gain": -1.5, "limiter": 1 } },
+    { "name": "Vocal", "values": { "bass": -2, "treble": 3, "width": 0.9, "crossfeed": 0.1, "reverb_mix": 0.06, "reverb_room": 0.3, "convolution_mix": 0.03, "convolution_predelay": 0, "convolution_damping": 0.45, "gain": 0, "limiter": 1 } }
+  ]
+}
