@@ -47,7 +47,12 @@ fun SoundScreen(vm: MainViewModel) {
     val values by EngineManager.values.collectAsState()
     val enabled by EngineManager.enabled.collectAsState()
     val message by EngineManager.message.collectAsState()
-    val levels = rememberLevels()
+    val hub = EngineManager.telemetry
+    TelemetryLifecycle(hub)
+    // `fast` is only read inside Canvas draw scopes, `slow` drives every text readout.
+    val fast = hub.telemetry.collectAsState()
+    val slow = hub.telemetry.collectThrottled(250)
+    val exporter = rememberReportExporter(hub)
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) vm.importEngine(uri)
@@ -69,10 +74,13 @@ fun SoundScreen(vm: MainViewModel) {
                     },
                     color = MistDim, fontSize = 13.sp,
                 )
-                Spacer(Modifier.height(12.dp))
-                LevelMeters(levels)
             }
         }
+
+        item(key = "levels") { LevelsCard(fast, slow) }
+        item(key = "spectrum") { SpectrumCard(hub, slow) }
+        item(key = "stereo") { StereoCard(fast, slow) }
+        item(key = "chain") { ChainCard(active, values, enabled, slow) }
 
         item {
             EngineCard(
@@ -141,6 +149,12 @@ fun SoundScreen(vm: MainViewModel) {
                 Pill("Reset to defaults", selected = false, onClick = { EngineManager.resetToDefaults() })
             }
         }
+
+        item(key = "timing") { TimingCard(slow) }
+        item(key = "quantum") { QuantumCard(active != null, slow) }
+        item(key = "benchmark") { BenchmarkCard(hub, slow) }
+        item(key = "device") { DeviceCard(hub, slow) }
+        item(key = "diagnostics") { DiagnosticsCard(hub, slow, active != null, exporter) }
     }
 }
 
