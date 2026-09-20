@@ -40,7 +40,16 @@ int bridge_latency_frames(const Bridge* b);   // frames of latency added by the 
 // Re-blocks to the configured quantum, in place. Falls back to bridge_process when the
 // quantum is AUTO or equals `frames`, or when `frames` exceeds the configured maximum.
 // Realtime safe: never allocates.
-void bridge_process_quantized(Bridge* b, float* interleaved, int frames);
+//
+// Returns the number of times ae_process() was actually invoked for this call. In AUTO that
+// is always 1; with a quantum it depends on how the host block lines up with the FIFO, so it
+// is reported rather than guessed (the caller needs it to attribute processing time).
+int bridge_process_quantized(Bridge* b, float* interleaved, int frames);
 
 // Clears the FIFO (call on seek / track change together with bridge_reset).
 void bridge_flush_fifo(Bridge* b);
+
+// Frames the FIFO had to fill with silence because the engine had not produced them yet.
+// Monotonic counter, written only by the audio thread, read by the JNI layer right after
+// bridge_process_quantized() returns. A non-zero value is a real, measured dropout.
+unsigned int bridge_fifo_underflow_frames(const Bridge* b);

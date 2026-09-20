@@ -92,8 +92,16 @@ struct State {
 
     // --- counters ------------------------------------------------------------------------
     AU framesProcessed, callbackCount, blockCount, deadlineMisses, clipCount;
-    AU nanCount, infCount, underruns, resetCount;
+    AU nanCount, infCount, resetCount;
     std::atomic<int> hostBlockFrames{0};
+
+    // Dropouts. fifoUnderflowFrames mirrors the bridge's own counter (audio thread);
+    // the sink* fields are fed by Media3's AnalyticsListener on a normal thread.
+    std::atomic<uint32_t> fifoUnderflowFrames{0};
+    std::atomic<uint32_t> fifoUnderflowBase{0};   // subtracted so resetStats() can zero it
+    AU sinkUnderruns, sinkErrors;
+    std::atomic<double> sinkUnderrunMs{-1.0};
+    std::atomic<int> sinkBufferFrames{0};
 
     // --- timing --------------------------------------------------------------------------
     AD procLastNs, procMinNs, procMaxNs;
@@ -158,7 +166,13 @@ void resetTimingLocked() {
     g.clipCount.set(0);
     g.nanCount.set(0);
     g.infCount.set(0);
-    g.underruns.set(0);
+    // The bridge's FIFO counter is monotonic and owned by the audio thread, so "reset" means
+    // re-baselining rather than zeroing it (zeroing it here would race the audio thread).
+    g.fifoUnderflowBase.store(g.fifoUnderflowFrames.load(std::memory_order_relaxed),
+                              std::memory_order_relaxed);
+    g.sinkUnderruns.set(0);
+    g.sinkErrors.set(0);
+    g.sinkUnderrunMs.store(-1.0, std::memory_order_relaxed);
 }
 
 void designFilters(int sr) {
@@ -418,8 +432,30 @@ void analyzeOutputAndSanitize(float* out, int frames) {
     if (infs) g.infCount.add(infs);
 }
 
-void noteUnderrun() { g.underruns.add(); }
-uint32_t fifoUnderflows() { return static_cast<uint32_t>(g.underruns.get()); }
+void setFifoUnderflowFrames(uint32_t frames) {
+    // Audio thread, one relaxed store per callback.
+    g.fifoUnderflowFrames.store(frames, std::memory_order_relaxed);
+}
+
+void noteSinkUnderrun(int64_t elapsedSinceLastFeedMs) {
+    g.sinkUnderruns.add();
+    g.sinkUnderrunMs.store(elapsedSinceLastFeedMs >= 0 ? static_cast<double>(elapsedSinceLastFeedMs) : -1.0,
+                           std::memory_order_relaxed);
+}
+
+void noteSinkError() { g.sinkErrors.add(); }
+
+void setSinkBufferFrames(int frames) {
+    if (frames > 0) g.sinkBufferFrames.store(frames, std::memory_order_relaxed);
+}
+
+uint32_t fifoUnderflows() {
+    const uint32_t now = g.fifoUnderflowFrames.load(std::memory_order_relaxed);
+    const uint32_t base = g.fifoUnderflowBase.load(std::memory_order_relaxed);
+    return now >= base ? now - base : now;
+}
+
+uint32_t sinkUnderruns() { return static_cast<uint32_t>(g.sinkUnderruns.get()); }
 
 // --- analyzer thread ---------------------------------------------------------------------
 
@@ -597,8 +633,12 @@ int snapshot(double* out, int cap) {
     out[S_BENCH_RT_RATIO] = g.benchRtRatio.get();
     out[S_BENCH_DEADLINE_MISSES] = static_cast<double>(g.benchDeadlineMisses.get());
 
-    out[S_FIFO_UNDERFLOWS] = static_cast<double>(g.underruns.get());
+    out[S_FIFO_UNDERFLOWS] = static_cast<double>(fifoUnderflows());
     out[S_RESET_COUNT] = static_cast<double>(g.resetCount.get());
+    out[S_SINK_UNDERRUNS] = static_cast<double>(g.sinkUnderruns.get());
+    out[S_SINK_UNDERRUN_MS] = g.sinkUnderrunMs.load(std::memory_order_relaxed);
+    out[S_SINK_ERRORS] = static_cast<double>(g.sinkErrors.get());
+    out[S_SINK_BUFFER_FRAMES] = g.sinkBufferFrames.load(std::memory_order_relaxed);
     return S_SLOT_COUNT;
 }
 
